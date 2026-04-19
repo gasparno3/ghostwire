@@ -10,7 +10,7 @@ import functools
 import psutil
 import tomllib
 import toml
-from flask import Flask,request,jsonify,Response
+from flask import Flask,request,jsonify,Response,send_from_directory
 from waitress import serve
 from updater import Updater
 
@@ -39,7 +39,9 @@ def _load_html():
 def _load_error_html(code):
     try:
         with open(os.path.join(_get_frontend_dir(),f"{code}.html"),"r") as f:
-            return f.read()
+            html=f.read()
+        prefix=f"/{panel_config.panel_path}" if panel_config and panel_config.panel_path else ""
+        return html.replace("{{prefix}}",prefix)
     except:
         return f"<h1>Error {code}</h1>",code
 
@@ -141,6 +143,10 @@ def check_prefix():
 def index():
     prefix=f"/{panel_config.panel_path}" if panel_config.panel_path else ""
     return _load_html().replace("{{prefix}}",prefix)
+
+@panel_route("/static/<path:filename>")
+def static_files(filename):
+    return send_from_directory(os.path.join(_get_frontend_dir(),"static"),filename)
 
 @panel_route("/api/status")
 def api_status():
