@@ -80,11 +80,11 @@ class GhostWireServer:
         return self.config.mode=="direct"
 
     def pick_direct_proxy(self,remote_port):
-        if remote_port==443 and self.config.https_proxy:
-            return self.config.https_proxy
-        if self.config.http_proxy:
-            return self.config.http_proxy
-        return self.config.https_proxy
+        if remote_port==443 and self.config.direct_https_proxy:
+            return self.config.direct_https_proxy
+        if self.config.direct_http_proxy:
+            return self.config.direct_http_proxy
+        return self.config.direct_https_proxy
 
     async def connect_via_http_proxy(self,target_host,target_port,proxy_url,timeout=10):
         parsed=urlparse(proxy_url)

@@ -63,6 +63,7 @@ def parse_port_mappings(port_specs):
 class ServerConfig:
     def __init__(self,config_path):
         config=load_toml(config_path)
+        server=config["server"]
         self.protocol=config["server"].get("protocol","websocket")
         self.listen_host=config["server"].get("listen_host","0.0.0.0")
         self.listen_port=config["server"].get("listen_port",8443)
@@ -87,10 +88,12 @@ class ServerConfig:
         self.auto_update=config["server"].get("auto_update",True)
         self.update_check_interval=config["server"].get("update_check_interval",300)
         self.update_check_on_startup=config["server"].get("update_check_on_startup",True)
-        self.update_http_proxy=config["server"].get("update_http_proxy","")
-        self.update_https_proxy=config["server"].get("update_https_proxy","")
-        self.http_proxy=config["server"].get("http_proxy",config["server"].get("direct_http_proxy",""))
-        self.https_proxy=config["server"].get("https_proxy",config["server"].get("direct_https_proxy",""))
+        self.update_http_proxy=server.get("update_http_proxy","")
+        self.update_https_proxy=server.get("update_https_proxy","")
+        self.http_proxy=server.get("http_proxy","")
+        self.https_proxy=server.get("https_proxy","")
+        self.direct_http_proxy=server.get("direct_http_proxy","")
+        self.direct_https_proxy=server.get("direct_https_proxy","")
         self.panel_enabled=config.get("panel",{}).get("enabled",False)
         self.panel_host=config.get("panel",{}).get("host","127.0.0.1")
         self.panel_port=config.get("panel",{}).get("port",9090)
@@ -103,6 +106,7 @@ class ServerConfig:
 class ClientConfig:
     def __init__(self,config_path):
         config=load_toml(config_path)
+        server=config["server"]
         self.protocol=config["server"].get("protocol","websocket")
         self.server_url=config["server"]["url"]
         self.token=config["server"]["token"]
@@ -129,10 +133,12 @@ class ClientConfig:
         self.auto_update=config["server"].get("auto_update",True)
         self.update_check_interval=config["server"].get("update_check_interval",300)
         self.update_check_on_startup=config["server"].get("update_check_on_startup",True)
-        self.update_http_proxy=config["server"].get("update_http_proxy","")
-        self.update_https_proxy=config["server"].get("update_https_proxy","")
-        self.http_proxy=config["server"].get("http_proxy",config["server"].get("direct_http_proxy",""))
-        self.https_proxy=config["server"].get("https_proxy",config["server"].get("direct_https_proxy",""))
+        self.update_http_proxy=server.get("update_http_proxy","")
+        self.update_https_proxy=server.get("update_https_proxy","")
+        self.http_proxy=server.get("http_proxy","")
+        self.https_proxy=server.get("https_proxy","")
+        self.direct_http_proxy=server.get("direct_http_proxy","")
+        self.direct_https_proxy=server.get("direct_https_proxy","")
         self.mode=config["server"].get("mode","reverse")
         self.direct_mode=config["server"].get("direct_mode","to_server")
         self.port_mappings=parse_port_mappings(config.get("tunnels",{}).get("ports",[]))
