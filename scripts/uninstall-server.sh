@@ -9,12 +9,16 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+read -p "Service name [ghostwire-server]: " GW_SERVICE_NAME
+GW_SERVICE_NAME=${GW_SERVICE_NAME:-ghostwire-server}
+GW_CONFIG_PATH="/etc/ghostwire/${GW_SERVICE_NAME}.toml"
+
 echo "Stopping and disabling service..."
-systemctl stop ghostwire-server || true
-systemctl disable ghostwire-server || true
+systemctl stop ${GW_SERVICE_NAME} || true
+systemctl disable ${GW_SERVICE_NAME} || true
 
 echo "Removing systemd service..."
-rm -f /etc/systemd/system/ghostwire-server.service
+rm -f /etc/systemd/system/${GW_SERVICE_NAME}.service
 systemctl daemon-reload
 
 echo "Removing binary..."
@@ -23,8 +27,8 @@ rm -f /usr/local/bin/ghostwire-server
 read -p "Remove configuration files? [y/N] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    rm -rf /etc/ghostwire
-    echo "Configuration removed"
+    rm -f "${GW_CONFIG_PATH}"
+    echo "Configuration removed: ${GW_CONFIG_PATH}"
 fi
 
 read -p "Remove ghostwire user? [y/N] " -n 1 -r

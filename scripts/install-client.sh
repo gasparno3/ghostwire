@@ -4,6 +4,8 @@ set -e
 GITHUB_REPO="frenchtoblerone54/ghostwire"
 VERSION="latest"
 GW_SERVICE_NAME="ghostwire-client"
+GW_CONFIG_PATH=""
+GW_LOG_PATH=""
 RED="\033[0;31m"
 GREEN="\033[0;32m"
 YELLOW="\033[1;33m"
@@ -58,6 +60,22 @@ if [ "$OS" != "Linux" ]; then
 fi
 p_ok "OS: Linux — OK"
 
+p_sep
+p_info "Service Name — lets you run multiple GhostWire client instances on one host."
+while true; do
+    p_ask "Service name [ghostwire-client]: "; read -r GW_SERVICE_NAME
+    GW_SERVICE_NAME=${GW_SERVICE_NAME:-ghostwire-client}
+    if [[ ! "$GW_SERVICE_NAME" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+        p_err "Use only letters, numbers, dot, underscore, @, or dash"
+        continue
+    fi
+    break
+done
+GW_CONFIG_PATH="/etc/ghostwire/${GW_SERVICE_NAME}.toml"
+GW_LOG_PATH="/var/log/${GW_SERVICE_NAME}.log"
+p_ok "Service name: ${GW_SERVICE_NAME}"
+p_ok "Configuration file: ${GW_CONFIG_PATH}"
+
 GW_BASE_URL="${GW_MIRROR_BASE_URL:-https://github.com/${GITHUB_REPO}/releases/${VERSION}/download}"
 p_step "Downloading GhostWire client..."
 wget -q --show-progress "${GW_BASE_URL}/ghostwire-client${BINARY_SUFFIX}" -O /tmp/ghostwire-client${BINARY_SUFFIX}
@@ -76,7 +94,7 @@ p_step "Creating configuration directory..."
 mkdir -p /etc/ghostwire
 p_ok "Directory ready: /etc/ghostwire"
 
-if [ ! -f /etc/ghostwire/client.toml ]; then
+if [ ! -f "${GW_CONFIG_PATH}" ]; then
     p_sep
     p_step "Client Configuration"
     while true; do
@@ -142,12 +160,6 @@ if [ ! -f /etc/ghostwire/client.toml ]; then
     else
         AUTO_UPDATE="false"
     fi
-    p_sep
-    p_info "Service Name — the systemd service name used for auto-restart after updates."
-    p_ask "Service name [ghostwire-client]: "; read -r GW_SERVICE_NAME
-    GW_SERVICE_NAME=${GW_SERVICE_NAME:-ghostwire-client}
-    p_ok "Service name: ${GW_SERVICE_NAME}"
-    p_sep
     p_step "Configuration Summary:"
     p_info "Server URL: ${SERVER_URL}"
     p_info "Mode: ${GW_MODE}"
@@ -163,7 +175,7 @@ if [ ! -f /etc/ghostwire/client.toml ]; then
         exit 1
     fi
 
-    cat > /etc/ghostwire/client.toml <<EOF
+    cat > "${GW_CONFIG_PATH}" <<EOF
 [server]
 protocol="websocket"
 url="${SERVER_URL}"
@@ -190,20 +202,22 @@ check_interval=300
 max_connection_time=1740
 EOF
     if [ "$GW_MODE" = "direct" ]; then
-        cat >> /etc/ghostwire/client.toml <<EOF
+        cat >> "${GW_CONFIG_PATH}" <<EOF
 
 [tunnels]
 ports=${TUNNEL_ARRAY}
 EOF
     fi
-    cat >> /etc/ghostwire/client.toml <<EOF
+    cat >> "${GW_CONFIG_PATH}" <<EOF
 
 [logging]
 level="info"
-file="/var/log/ghostwire-client.log"
+file="${GW_LOG_PATH}"
 EOF
 
-    p_ok "Configuration created at /etc/ghostwire/client.toml"
+    p_ok "Configuration created at ${GW_CONFIG_PATH}"
+else
+    p_warn "Configuration already exists at ${GW_CONFIG_PATH}"
 fi
 
 p_step "Installing systemd service..."
@@ -214,7 +228,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ghostwire-client -c /etc/ghostwire/client.toml
+ExecStart=/usr/local/bin/ghostwire-client -c ${GW_CONFIG_PATH}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
@@ -240,7 +254,7 @@ p_sep
 p_ok "Installation complete!"
 p_sep
 p_info "Client is running and connecting to the server"
-p_info "Configuration: /etc/ghostwire/client.toml"
+p_info "Configuration: ${GW_CONFIG_PATH}"
 p_info "Tip: If connection is unreliable, enable Cloudflare proxy for your domain to improve stability."
 echo ""
 p_info "Useful commands:"

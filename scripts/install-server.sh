@@ -4,6 +4,8 @@ set -e
 GITHUB_REPO="frenchtoblerone54/ghostwire"
 VERSION="latest"
 GW_SERVICE_NAME="ghostwire-server"
+GW_CONFIG_PATH=""
+GW_LOG_PATH=""
 RED="\033[0;31m"
 GREEN="\033[0;32m"
 YELLOW="\033[1;33m"
@@ -84,6 +86,22 @@ if [ "$OS" != "Linux" ]; then
 fi
 p_ok "OS: Linux — OK"
 
+p_sep
+p_info "Service Name — lets you run multiple GhostWire server instances on one host."
+while true; do
+    p_ask "Service name [ghostwire-server]: "; read -r GW_SERVICE_NAME
+    GW_SERVICE_NAME=${GW_SERVICE_NAME:-ghostwire-server}
+    if [[ ! "$GW_SERVICE_NAME" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+        p_err "Use only letters, numbers, dot, underscore, @, or dash"
+        continue
+    fi
+    break
+done
+GW_CONFIG_PATH="/etc/ghostwire/${GW_SERVICE_NAME}.toml"
+GW_LOG_PATH="/var/log/${GW_SERVICE_NAME}.log"
+p_ok "Service name: ${GW_SERVICE_NAME}"
+p_ok "Configuration file: ${GW_CONFIG_PATH}"
+
 GW_BASE_URL="${GW_MIRROR_BASE_URL:-https://github.com/${GITHUB_REPO}/releases/${VERSION}/download}"
 p_step "Downloading GhostWire server..."
 wget -q --show-progress "${GW_BASE_URL}/ghostwire-server${BINARY_SUFFIX}" -O /tmp/ghostwire-server${BINARY_SUFFIX}
@@ -102,7 +120,7 @@ p_step "Creating configuration directory..."
 mkdir -p /etc/ghostwire
 p_ok "Directory ready: /etc/ghostwire"
 
-if [ ! -f /etc/ghostwire/server.toml ]; then
+if [ ! -f "${GW_CONFIG_PATH}" ]; then
     p_step "Generating authentication token..."
     TOKEN=$(/usr/local/bin/ghostwire-server --generate-token)
     p_ok "Token generated"
@@ -187,12 +205,6 @@ threads=4"
     p_ask "WebSocket pool size (ws_pool_children) [8]: "; read -r WS_POOL_CHILDREN
     WS_POOL_CHILDREN=${WS_POOL_CHILDREN:-8}
     p_ok "ws_pool_children: ${WS_POOL_CHILDREN}"
-    p_sep
-    p_info "Service Name — the systemd service name used for auto-restart after updates."
-    p_ask "Service name [ghostwire-server]: "; read -r GW_SERVICE_NAME
-    GW_SERVICE_NAME=${GW_SERVICE_NAME:-ghostwire-server}
-    p_ok "Service name: ${GW_SERVICE_NAME}"
-    p_sep
     p_step "Configuration Summary:"
     p_info "WebSocket: ${WS_HOST}:${WS_PORT}/ws"
     p_info "Mode: ${GW_MODE}"
@@ -209,7 +221,7 @@ threads=4"
         exit 1
     fi
 
-    cat > /etc/ghostwire/server.toml <<EOF
+    cat > "${GW_CONFIG_PATH}" <<EOF
 [server]
 protocol="websocket"
 listen_host="${WS_HOST}"
@@ -234,27 +246,27 @@ service_name="${GW_SERVICE_NAME}"
 token="${TOKEN}"
 EOF
     if [ "$GW_MODE" = "reverse" ]; then
-        cat >> /etc/ghostwire/server.toml <<EOF
+        cat >> "${GW_CONFIG_PATH}" <<EOF
 
 [tunnels]
 ports=${TUNNEL_ARRAY}
 EOF
     fi
-    cat >> /etc/ghostwire/server.toml <<EOF
+    cat >> "${GW_CONFIG_PATH}" <<EOF
 
 [logging]
 level="info"
-file="/var/log/ghostwire-server.log"${PANEL_CONFIG}
+file="${GW_LOG_PATH}"${PANEL_CONFIG}
 EOF
 
-    p_ok "Configuration created at /etc/ghostwire/server.toml"
+    p_ok "Configuration created at ${GW_CONFIG_PATH}"
     p_token_box "$TOKEN"
     [[ $PANEL_ENABLED == "true" ]] && p_panel_box "http://${PANEL_HOST}:${PANEL_PORT}/${PANEL_PATH}/"
     p_info "Tip: If using a domain, enable Cloudflare proxy for better reliability and DDoS protection."
     echo ""
 else
-    p_warn "Configuration already exists at /etc/ghostwire/server.toml"
-    WS_PORT=$(grep "listen_port" /etc/ghostwire/server.toml | cut -d"=" -f2 | tr -d " ")
+    p_warn "Configuration already exists at ${GW_CONFIG_PATH}"
+    WS_PORT=$(grep "listen_port" "${GW_CONFIG_PATH}" | cut -d"=" -f2 | tr -d " ")
     WS_PORT=${WS_PORT:-8443}
 fi
 
@@ -266,7 +278,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ghostwire-server -c /etc/ghostwire/server.toml
+ExecStart=/usr/local/bin/ghostwire-server -c ${GW_CONFIG_PATH}
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
@@ -437,7 +449,7 @@ p_ok "GhostWire server is running"
 p_sep
 p_ok "Installation complete!"
 p_sep
-p_info "Configuration: /etc/ghostwire/server.toml"
+p_info "Configuration: ${GW_CONFIG_PATH}"
 echo ""
 p_info "Useful commands:"
 echo -e "  ${DIM}sudo systemctl status ${GW_SERVICE_NAME}${NC}"
