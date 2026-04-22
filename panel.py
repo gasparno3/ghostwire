@@ -2,6 +2,7 @@
 import json
 import os
 import select
+import shlex
 import subprocess
 import sys
 import threading
@@ -20,6 +21,42 @@ panel_config=None
 server_instance=None
 server_start_time=time.time()
 _routes=[]
+
+def _get_current_service_name():
+    try:
+        with open("/proc/self/cgroup","r") as f:
+            for line in f:
+                path=line.strip().split(":",2)[-1]
+                if path.endswith(".service"):
+                    return os.path.basename(path)
+    except:
+        pass
+    return None
+
+@functools.lru_cache(maxsize=1)
+def _get_service_config_path():
+    default_path="/etc/ghostwire/server.toml"
+    try:
+        service_name=_get_current_service_name()
+        if not service_name:
+            return default_path
+        result=subprocess.run(["systemctl","show","--property=FragmentPath","--value",service_name],capture_output=True,text=True,timeout=5,check=True)
+        service_path=result.stdout.strip()
+        if not service_path or not os.path.exists(service_path):
+            return default_path
+        with open(service_path,"r") as f:
+            for line in f:
+                line=line.strip()
+                if not line.startswith("ExecStart="):
+                    continue
+                cmd=line.split("=",1)[1].strip()
+                parts=shlex.split(cmd)
+                for i,part in enumerate(parts):
+                    if part in ["-c","--config"] and i+1<len(parts):
+                        return parts[i+1]
+        return default_path
+    except:
+        return default_path
 
 def panel_route(path="",methods=["GET"]):
     def decorator(func):
@@ -69,11 +106,11 @@ def get_os_uptime():
         return "N/A"
 
 def read_config():
-    with open("/etc/ghostwire/server.toml","rb") as f:
+    with open(_get_service_config_path(),"rb") as f:
         return tomllib.load(f)
 
 def write_config(config):
-    with open("/etc/ghostwire/server.toml","w") as f:
+    with open(_get_service_config_path(),"w") as f:
         toml.dump(config,f)
 
 def tail_log(lines=100):
@@ -185,7 +222,7 @@ def api_remove_tunnel(index):
 
 @panel_route("/api/config")
 def api_get_config():
-    with open("/etc/ghostwire/server.toml","r") as f:
+    with open(_get_service_config_path(),"r") as f:
         return f.read()
 
 @panel_route("/api/config",methods=["POST"])
@@ -193,7 +230,7 @@ def api_save_config():
     try:
         config_text=request.data.decode()
         tomllib.loads(config_text)
-        with open("/etc/ghostwire/server.toml","w") as f:
+        with open(_get_service_config_path(),"w") as f:
             f.write(config_text)
         return jsonify({"success":True})
     except Exception as e:
