@@ -717,13 +717,18 @@ class GhostWireClient:
     async def connect(self):
         try:
             server_url=self.config.server_url
+            cf_sni=None
             if self.config.cloudflare_enabled and self.config.cloudflare_ips:
                 best_ip=await self.find_best_cloudflare_ip()
                 if best_ip:
                     server_url=self.config.server_url.replace(self.config.cloudflare_host,best_ip)
+                    cf_sni=self.config.cloudflare_host
                     logger.info(f"Using CloudFlare IP: {best_ip}")
             self.connected_server_url=server_url
             server_url,extra_headers,sni_host=self.apply_resolve_ip(server_url)
+            if cf_sni and not sni_host:
+                sni_host=cf_sni
+                extra_headers["Host"]=cf_sni
             if self.config.protocol=="http2":
                 from http2_transport import HTTP2ClientTransport
                 self.http2_transport=HTTP2ClientTransport(server_url,self.config.token)
@@ -863,7 +868,7 @@ class GhostWireClient:
                 start=time.time()
                 session=aiohttp.ClientSession()
                 try:
-                    ws_raw=await asyncio.wait_for(session.ws_connect(test_url,max_msg_size=0,compress=False,heartbeat=None,proxy=self.pick_ws_proxy(test_url),ssl=self.make_ssl_context(test_url)),timeout=5)
+                    ws_raw=await asyncio.wait_for(session.ws_connect(test_url,max_msg_size=0,compress=False,heartbeat=None,proxy=self.pick_ws_proxy(test_url),ssl=self.make_ssl_context(test_url),headers={"Host":self.config.cloudflare_host},server_hostname=self.config.cloudflare_host),timeout=5)
                 except Exception:
                     await session.close()
                     raise
