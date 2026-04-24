@@ -115,7 +115,7 @@ def write_config(config):
 
 def tail_log(lines=100):
     try:
-        result=subprocess.run(["tail","-n",str(lines),"/var/log/ghostwire-server.log"],capture_output=True,text=True,timeout=5)
+        result=subprocess.run(["tail","-n",str(lines),panel_config.log_file],capture_output=True,text=True,timeout=5)
         return result.stdout
     except:
         return "Error reading log file"
@@ -244,7 +244,7 @@ def api_logs():
 def api_logs_stream():
     def generate():
         try:
-            proc=subprocess.Popen(["tail","-f","-n","50","/var/log/ghostwire-server.log"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            proc=subprocess.Popen(["tail","-f","-n","50",panel_config.log_file],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             last_send=time.time()
             while True:
                 ready=select.select([proc.stdout],[],[],1.0)[0]
