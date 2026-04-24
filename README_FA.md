@@ -151,11 +151,11 @@ ports=[
 
 ```toml
 [server]
-protocol="websocket"        # "websocket" (پیش‌فرض)، "http2" یا "grpc"
+protocol="websocket"        # "websocket" (پیش‌فرض)، "http-request"، "http2" یا "grpc"
 listen_host="0.0.0.0"
 listen_port=8443
 listen_backlog=4096         # عمق صف گوش دادن TCP
-websocket_path="/ws"        # فقط برای پروتکل websocket استفاده می‌شود
+websocket_path="/ws"        # برای پروتکل‌های websocket و http-request استفاده می‌شود
 ping_interval=30            # فاصله پینگ سطح برنامه (ثانیه)
 ping_timeout=60             # تایم‌اوت اتصال (ثانیه)
 ws_pool_enabled=true        # فعال کردن استخر کانال فرزند (پیش‌فرض: true)
@@ -164,6 +164,10 @@ ws_pool_min=2               # حداقل کانال‌های همیشه متصل
 ws_pool_stripe=false        # خط زدن پکت‌ها در کانال‌ها (ناپایدار، پیش‌فرض: false)
 udp_enabled=true            # همچنین برای UDP روی پورت‌های تونل گوش می‌دهد (پیش‌فرض: true)
 ws_send_batch_bytes=65536   # حداکثر بایت در هر فریم WebSocket (پیش‌فرض: 65536)
+http_request_min_upload_ms=50      # حداقل فاصله بین POSTهای آپلود
+http_request_min_download_ms=100   # حداقل فاصله بین درخواست‌های polling
+http_request_max_upload_bytes=262144    # حداکثر بایت در هر درخواست آپلود
+http_request_max_download_bytes=262144  # حداکثر بایت در هر پاسخ polling یا upload
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -201,12 +205,16 @@ file="/var/log/ghostwire-server.log"
 
 ```toml
 [server]
-protocol="websocket"        # "websocket" (پیش‌فرض)، "http2" یا "grpc"
-url="wss://tunnel.example.com/ws"  # از wss:// برای websocket، https:// برای http2/grpc استفاده کنید
+protocol="websocket"        # "websocket" (پیش‌فرض)، "http-request"، "http2" یا "grpc"
+url="wss://tunnel.example.com/ws"  # از ws(s):// برای websocket و از http(s):// برای http-request/http2/grpc استفاده کنید
 token="V1StGXR8_Z5jdHi6B-my"
 ping_interval=30            # فاصله پینگ سطح برنامه (ثانیه)
 ping_timeout=60             # تایم‌اوت اتصال (ثانیه)
 ws_send_batch_bytes=65536   # حداکثر بایت در هر فریم WebSocket (پیش‌فرض: 65536)
+http_request_min_upload_ms=50      # حداقل فاصله بین POSTهای آپلود
+http_request_min_download_ms=100   # حداقل فاصله بین درخواست‌های polling
+http_request_max_upload_bytes=262144    # حداکثر بایت در هر درخواست آپلود
+http_request_max_download_bytes=262144  # حداکثر بایت در هر پاسخ polling یا upload
 allow_insecure=false       # اجازه به گواهی‌های منقضی/خودامضا (ایمنی کمتر)
 resolve_ip=""              # پیش‌رزولو دامنه به IP؛ دامنه همچنان به عنوان Host header ارسال می‌شود
 sni=""                     # بازنویسی SNI در TLS (پیش‌فرض: دامنه اصلی هنگام استفاده از resolve_ip)
@@ -272,6 +280,15 @@ update_https_proxy="http://127.0.0.1:8080"
   - **262144 (256KB)**: توان عملیاتی بالاتر، افزایش تأخیر زیر بار
   - **16384 (16KB)**: کمترین تأخیر، کمی کاهش توان عملیاتی
 
+- **`http_request_min_upload_ms`** و **`http_request_min_download_ms`** (هر دو، پیش‌فرض: `50` و `100`): حداقل فاصله بین درخواست‌های آپلود و polling برای `protocol="http-request"`
+  - برای کاهش تعداد درخواست‌ها و شبیه‌تر شدن به ترافیک HTTP غیر استریم این مقادیر را افزایش دهید
+  - برای کاهش تأخیر با هزینه افزایش تعداد درخواست‌ها این مقادیر را کاهش دهید
+
+- **`http_request_max_upload_bytes`** و **`http_request_max_download_bytes`** (هر دو، پیش‌فرض: `262144`): سقف حجم هر درخواست آپلود و هر پاسخ polling/upload در `protocol="http-request"`
+  - `262144` بایت برابر `256KB` (`0.25 MB`) است
+  - `524288` بایت برابر `512KB` (`0.5 MB`) است
+  - مقادیر بزرگ‌تر توان عملیاتی را بیشتر می‌کنند و مقادیر کوچک‌تر اندازه burst هر درخواست را کمتر می‌کنند
+
 - **`ping_interval`** و **`ping_timeout`**: برای پایداری CloudFlare حیاتی است (هم روی سرور و هم کلاینت تنظیم کنید)
   - **برای تأخیر کم (< 50ms)**: `ping_interval=10`، `ping_timeout=10`
   - **برای تأخیر زیاد (> 200ms، CloudFlare)**: `ping_interval=30`، `ping_timeout=60`
@@ -280,7 +297,7 @@ update_https_proxy="http://127.0.0.1:8080"
 
 ## گزینه‌های پروتکل
 
-گوست‌وایر از سه پروتکل انتقال پشتیبانی می‌کند، هر کدام با معاملات متفاوت:
+گوست‌وایر از چهار پروتکل انتقال پشتیبانی می‌کند، هر کدام با معاملات متفاوت:
 
 ### پروتکل WebSocket (protocol="websocket") - پیش‌فرض
 
@@ -334,6 +351,36 @@ location /tunnel {
 }
 ```
 
+### پروتکل HTTP در هر درخواست (protocol="http-request") - HTTP غیر استریم
+
+بهترین برای: محیط‌هایی که فقط HTTP معمولی دارند یا استریم در آن‌ها ناپایدار/مسدود است، در حالی که همچنان از پیام‌های رمزگذاری‌شده و احراز هویت‌شده GhostWire استفاده می‌کنید
+
+- ✅ از درخواست‌های معمولی HTTP به جای یک اتصال استریم بلندمدت استفاده می‌کند
+- ✅ آپلود با `POST` و دانلود با polling انجام می‌شود
+- ✅ پاسخ درخواست‌های آپلود می‌تواند داده دانلود را هم برگرداند تا تعداد درخواست‌ها کمتر شود
+- ✅ با reverse proxyهای ساده HTTP که WebSocket/gRPC را خوب پشتیبانی نمی‌کنند سازگارتر است
+- ❌ سربار درخواست بیشتری نسبت به WebSocket/gRPC/HTTP2 استریم دارد
+- ❌ تأخیر و توان عملیاتی شدیدا به تنظیمات interval و size وابسته است
+- ❌ استخر کانال‌های WebSocket برای این پروتکل اعمال نمی‌شود
+
+**تنظیمات:**
+```toml
+[server]
+protocol="http-request"
+url="https://tunnel.example.com/ws"
+http_request_min_upload_ms=10
+http_request_min_download_ms=10
+http_request_max_upload_bytes=524288
+http_request_max_download_bytes=524288
+```
+
+**نحوه کار:**
+- کلاینت پکت‌های رمزگذاری‌شده GhostWire را با HTTP `POST` آپلود می‌کند
+- کلاینت داده‌های صف‌شده را با polling دانلود می‌کند
+- سرور می‌تواند داده‌های دانلود را مستقیم در پاسخ آپلود برگرداند
+- تنظیمات min upload/download فرکانس درخواست‌ها را محدود می‌کنند
+- تنظیمات max upload/download سقف حجم هر درخواست را مشخص می‌کنند
+
 ### پروتکل gRPC (protocol="grpc") - بهینه‌سازی شده برای CloudFlare
 
 بهترین برای: CloudFlare با gRPC فعال، سناریوهای عملکرد بالا
@@ -369,6 +416,7 @@ location /tunnel {
 
 **راهنمای انتخاب پروتکل:**
 - **از WebSocket استفاده کنید** اگر: از طریق CloudFlare اجرا می‌کنید (رایج‌ترین حالت)، حداکثر سازگاری نیاز دارید
+- **از HTTP per-request استفاده کنید** اگر: به ترابری HTTP غیر استریم نیاز دارید ولی همچنان امنیت و تونل GhostWire را می‌خواهید
 - **از gRPC استفاده کنید** اگر: از طریق CloudFlare با gRPC فعال اجرا می‌کنید، بهترین عملکرد می‌خواهید
 - **از HTTP/2 استفاده کنید** اگر: اتصال مستقیم بدون CloudFlare، راه‌اندازی پروکسی سفارشی
 
@@ -400,6 +448,20 @@ location /tunnel {
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_read_timeout 86400s;
+}
+```
+
+**برای پروتکل HTTP per-request:**
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+    proxy_buffering off;
+    proxy_request_buffering off;
 }
 ```
 

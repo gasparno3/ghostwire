@@ -17,6 +17,7 @@ from config import ClientConfig
 from tunnel import TunnelManager
 from updater import Updater
 from aiohttp_ws_transport import AiohttpClientWebSocket
+from http_request_transport import HTTPRequestClientTransport
 from udp_transport import UDPClientTransport,UDPWriterAdapter,_UDPDataProtocol as UDPDataProtocol
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s")
@@ -37,6 +38,7 @@ class GhostWireClient:
         self.websocket=None
         self.main_websocket=None
         self.http2_transport=None
+        self.http_request_transport=None
         self.grpc_transport=None
         self.udp_transport=None
         self.direct_listeners=[]
@@ -66,6 +68,7 @@ class GhostWireClient:
         self.channel_stop_events={}
         self.child_worker_tasks={}
         self.desired_child_count=0
+        self.last_http_request_reconnect_log=0
         self.data_rr_index=0
         self.conn_data_tx_seq={}
         self.conn_data_seq_enabled=set()
@@ -628,6 +631,8 @@ class GhostWireClient:
         if channel_id=="main":
             if self.config.protocol=="http2":
                 return {"transport":self.http2_transport,"send_queue":self.main_send_queue,"control_queue":self.main_control_queue}
+            elif self.config.protocol=="http-request":
+                return {"transport":self.http_request_transport,"send_queue":self.main_send_queue,"control_queue":self.main_control_queue}
             elif self.config.protocol=="grpc":
                 return {"transport":self.grpc_transport,"send_queue":self.main_send_queue,"control_queue":self.main_control_queue}
             else:
@@ -733,6 +738,19 @@ class GhostWireClient:
                 await self.http2_transport.send(info_msg)
                 self.reconnect_delay=self.config.initial_delay
                 return True
+            elif self.config.protocol=="http-request":
+                self.http_request_transport=HTTPRequestClientTransport(server_url,self.config.token,self.config,headers=extra_headers,proxy=self.pick_ws_proxy(server_url),ssl_context=self.make_ssl_context(server_url))
+                success=await self.http_request_transport.connect()
+                if not success:
+                    return False
+                self.key=self.http_request_transport.key
+                self.last_ping_time=time.time()
+                self.last_pong_time=time.time()
+                self.last_rx_time=time.time()
+                info_msg=await pack_info(self.updater.current_version,self.key)
+                await self.http_request_transport.send(info_msg)
+                self.reconnect_delay=self.config.initial_delay
+                return True
             elif self.config.protocol=="grpc":
                 from grpc_transport import GrpcClientTransport
                 self.grpc_transport=GrpcClientTransport(server_url,self.config.token)
@@ -833,6 +851,7 @@ class GhostWireClient:
             self.connected_server_url=""
             self.main_websocket=None
             self.websocket=None
+            self.http_request_transport=None
             return False
 
     async def find_best_cloudflare_ip(self):
@@ -1078,9 +1097,10 @@ class GhostWireClient:
             try:
                 await asyncio.sleep(self.ping_interval)
                 http2_alive=self.config.protocol=="http2" and self.http2_transport and self.http2_transport.connected
+                http_request_alive=self.config.protocol=="http-request" and self.http_request_transport and self.http_request_transport.connected
                 grpc_alive=self.config.protocol=="grpc" and self.grpc_transport and self.grpc_transport.connected
                 udp_alive=self.config.protocol=="udp" and self.udp_transport and self.udp_transport.connected
-                if self.main_websocket or http2_alive or grpc_alive or udp_alive:
+                if self.main_websocket or http2_alive or http_request_alive or grpc_alive or udp_alive:
                     timestamp=int(time.time()*1000)
                     if self.main_control_queue:
                         try:
@@ -1100,7 +1120,7 @@ class GhostWireClient:
                 break
 
     async def ping_timeout_monitor(self):
-        while self.running and (self.main_websocket or (self.config.protocol=="http2" and self.http2_transport and self.http2_transport.connected) or (self.config.protocol=="grpc" and self.grpc_transport and self.grpc_transport.connected) or (self.config.protocol=="udp" and self.udp_transport and self.udp_transport.connected)):
+        while self.running and (self.main_websocket or (self.config.protocol=="http2" and self.http2_transport and self.http2_transport.connected) or (self.config.protocol=="http-request" and self.http_request_transport and self.http_request_transport.connected) or (self.config.protocol=="grpc" and self.grpc_transport and self.grpc_transport.connected) or (self.config.protocol=="udp" and self.udp_transport and self.udp_transport.connected)):
             await asyncio.sleep(15)
             now=time.time()
             last_activity=max(self.last_rx_time,self.last_pong_time)
@@ -1108,6 +1128,8 @@ class GhostWireClient:
                 logger.warning("Server ping timeout, closing connection")
                 if self.config.protocol=="http2" and self.http2_transport:
                     await self.http2_transport.close()
+                elif self.config.protocol=="http-request" and self.http_request_transport:
+                    await self.http_request_transport.close()
                 elif self.config.protocol=="grpc" and self.grpc_transport:
                     await self.grpc_transport.close()
                 elif self.config.protocol=="udp" and self.udp_transport:
@@ -1209,6 +1231,9 @@ class GhostWireClient:
                     if self.config.protocol=="http2":
                         sender_task=asyncio.create_task(self.http2_sender_task(self.http2_transport,send_queue,control_queue,stop_event))
                         receive_task=asyncio.create_task(self.http2_receive_messages(self.http2_transport,"main"))
+                    elif self.config.protocol=="http-request":
+                        sender_task=asyncio.create_task(self.http2_sender_task(self.http_request_transport,send_queue,control_queue,stop_event))
+                        receive_task=asyncio.create_task(self.grpc_receive_messages(self.http_request_transport,"main"))
                     elif self.config.protocol=="grpc":
                         sender_task=asyncio.create_task(self.http2_sender_task(self.grpc_transport,send_queue,control_queue,stop_event))
                         receive_task=asyncio.create_task(self.grpc_receive_messages(self.grpc_transport,"main"))
@@ -1262,6 +1287,13 @@ class GhostWireClient:
                             except:
                                 pass
                         self.http2_transport=None
+                    elif self.config.protocol=="http-request":
+                        if self.http_request_transport:
+                            try:
+                                await asyncio.wait_for(self.http_request_transport.close(),timeout=2)
+                            except:
+                                pass
+                        self.http_request_transport=None
                     elif self.config.protocol=="grpc":
                         if self.grpc_transport:
                             try:
@@ -1292,7 +1324,11 @@ class GhostWireClient:
                     self.tunnel_manager.close_all()
             if self.running and not self.shutdown_event.is_set():
                 jitter_delay=self.reconnect_delay*(0.5+random.random())
-                logger.info(f"Reconnecting in {jitter_delay:.1f} seconds...")
+                now=time.time()
+                if self.config.protocol!="http-request" or now-self.last_http_request_reconnect_log>=10:
+                    logger.info(f"Reconnecting in {jitter_delay:.1f} seconds...")
+                    if self.config.protocol=="http-request":
+                        self.last_http_request_reconnect_log=now
                 try:
                     await asyncio.wait_for(self.shutdown_event.wait(),timeout=jitter_delay)
                     break

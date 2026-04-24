@@ -4,6 +4,7 @@ import subprocess
 import time
 import socket
 import sys
+import argparse
 from collections import Counter
 
 def get_free_port():
@@ -20,14 +21,29 @@ def percentile(values,p):
     idx=max(0,min(len(values)-1,int((len(values)-1)*p)))
     return values[idx]
 
-def write_test_configs(ws_port,tunnel_port,target_port):
+def write_test_configs(ws_port,tunnel_port,target_port,protocol):
+    if protocol=="http-request":
+        request_cfg="""
+http_request_min_upload_ms=10
+http_request_min_download_ms=10
+http_request_max_upload_bytes=524288
+http_request_max_download_bytes=524288
+"""
+    else:
+        request_cfg="""
+http_request_min_upload_ms=50
+http_request_min_download_ms=50
+http_request_max_upload_bytes=131072
+http_request_max_download_bytes=131072
+"""
     server_cfg=f"""[server]
-protocol="grpc"
+protocol="{protocol}"
 listen_host="127.0.0.1"
 listen_port={ws_port}
 websocket_path="/ws"
 auto_update=false
 ping_timeout=30
+{request_cfg}
 
 [auth]
 token="test_token_123456"
@@ -40,10 +56,12 @@ level="info"
 file="/tmp/ghostwire-bench-server.log"
 """
     client_cfg=f"""[server]
-protocol="grpc"
+protocol="{protocol}"
 url="http://127.0.0.1:{ws_port}/ws"
 token="test_token_123456"
 auto_update=false
+ping_timeout=30
+{request_cfg}
 
 [reconnect]
 initial_delay=1
@@ -153,13 +171,13 @@ async def run_bulk_batch(port,total,concurrency):
     elapsed=time.time()-start
     return total_bytes,elapsed,errors
 
-async def run_benchmark():
+async def run_benchmark(protocol):
     print("⚡ Concurrent Receive Speed Test")
     print("="*60)
     ws_port=get_free_port()
     tunnel_port=get_free_port()
     target_port=get_free_port()
-    server_cfg,client_cfg=write_test_configs(ws_port,tunnel_port,target_port)
+    server_cfg,client_cfg=write_test_configs(ws_port,tunnel_port,target_port,protocol)
     backend=BackendServer(target_port)
     await backend.start()
     print(f"✅ Backend started on {target_port}")
@@ -207,7 +225,10 @@ async def run_benchmark():
     return True
 
 try:
-    result=asyncio.run(run_benchmark())
+    parser=argparse.ArgumentParser(description="GhostWire concurrent receive speed test")
+    parser.add_argument("--protocol",default="grpc",help="Transport protocol to benchmark")
+    args=parser.parse_args()
+    result=asyncio.run(run_benchmark(args.protocol))
     sys.exit(0 if result else 1)
 except KeyboardInterrupt:
     print("\nInterrupted")

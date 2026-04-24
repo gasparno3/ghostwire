@@ -144,12 +144,12 @@ ports=[
 
 ```toml
 [server]
-protocol="websocket"       # "websocket" (default), "http2", or "grpc"
+protocol="websocket"       # "websocket" (default), "http-request", "http2", or "grpc"
 listen_host="0.0.0.0"
 listen_port=8443
 mode="reverse"             # "reverse" (default) or "direct"
 listen_backlog=4096        # TCP listen queue depth
-websocket_path="/ws"       # Only used for websocket protocol
+websocket_path="/ws"       # Used by websocket and http-request protocols
 ping_interval=30           # Application-level ping interval (seconds)
 ping_timeout=60            # Connection timeout (seconds)
 http_proxy=""              # optional: proxy for outbound CONNECT tunnel traffic
@@ -160,6 +160,10 @@ ws_pool_min=2              # Min always-connected channels (default: 2)
 ws_pool_stripe=false       # Stripe packets across channels (unstable, default: false)
 udp_enabled=true           # Also listen for UDP on tunnel ports (default: true)
 ws_send_batch_bytes=65536  # Max bytes per WebSocket frame (default: 65536)
+http_request_min_upload_ms=50      # Minimum delay between upload POSTs
+http_request_min_download_ms=100   # Minimum delay between poll requests
+http_request_max_upload_bytes=262144    # Max bytes sent in a single upload POST
+http_request_max_download_bytes=262144  # Max bytes returned in a single poll/upload response
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -210,6 +214,13 @@ For web browsing with hundreds of concurrent connections (typical modern website
   - **65536 (64KB)**: Default, best balance for most use cases
   - **262144 (256KB)**: Higher throughput, some latency increase under load
   - **16384 (16KB)**: Lowest latency, slightly lower throughput
+- **`http_request_min_upload_ms`** and **`http_request_min_download_ms`** (both, defaults: `50` and `100`): Minimum spacing between upload POSTs and download polls for `protocol="http-request"`
+  - Increase them to reduce request count and blend in with non-streaming HTTP transports
+  - Decrease them to improve latency at the cost of more HTTP requests
+- **`http_request_max_upload_bytes`** and **`http_request_max_download_bytes`** (both, default: `262144`): Per-request caps for upload POST bodies and poll/upload responses in `protocol="http-request"`
+  - `262144` bytes is `256KB` (`0.25 MB`)
+  - `524288` bytes is `512KB` (`0.5 MB`)
+  - Larger values improve throughput, smaller values reduce per-request burst size
 
 - **`ping_interval`** and **`ping_timeout`**: Critical for CloudFlare stability (configure on both server and client)
   - **For low latency (< 50ms)**: `ping_interval=10`, `ping_timeout=10`
@@ -223,8 +234,8 @@ For web browsing with hundreds of concurrent connections (typical modern website
 
 ```toml
 [server]
-protocol="websocket"       # "websocket" (default), "http2", or "grpc"
-url="wss://tunnel.example.com/ws"  # Use wss:// for websocket, https:// for http2/grpc
+protocol="websocket"       # "websocket" (default), "http-request", "http2", or "grpc"
+url="wss://tunnel.example.com/ws"  # Use ws(s):// for websocket, http(s):// for http-request/http2/grpc
 token="V1StGXR8_Z5jdHi6B-my"
 mode="reverse"             # must match server mode
 ping_interval=30           # Application-level ping interval (seconds)
@@ -237,6 +248,10 @@ sni=""                     # override TLS SNI hostname (default: original domain
 host_header=""             # override Host header (default: original domain when resolve_ip is set)
 service_name="ghostwire-client"  # systemd service name for auto-restart after update
 ws_send_batch_bytes=65536  # Max bytes per WebSocket frame (default: 65536)
+http_request_min_upload_ms=50      # Minimum delay between upload POSTs
+http_request_min_download_ms=100   # Minimum delay between poll requests
+http_request_max_upload_bytes=262144    # Max bytes sent in a single upload POST
+http_request_max_download_bytes=262144  # Max bytes returned in a single poll/upload response
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -295,7 +310,7 @@ https_proxy="http://127.0.0.1:8080"
 
 ## Protocol Options
 
-GhostWire supports three transport protocols, each with different trade-offs:
+GhostWire supports four transport protocols, each with different trade-offs:
 
 ### WebSocket Protocol (`protocol="websocket"`) - Default
 
@@ -343,6 +358,36 @@ location /tunnel {
 }
 ```
 
+### HTTP Per-Request Protocol (`protocol="http-request"`) - Non-Streaming HTTP
+
+**Best for:** HTTP-only environments where streaming is unreliable or blocked, while still using GhostWire's encrypted/authenticated tunnel messages
+
+- ✅ Uses regular HTTP requests instead of a long-lived stream
+- ✅ Uploads data with `POST` and downloads with polling
+- ✅ Upload responses can also carry download data to reduce extra requests
+- ✅ Works with simple HTTP reverse proxies that do not support WebSocket/gRPC streaming well
+- ❌ Higher request overhead than WebSocket/gRPC/HTTP2 streaming
+- ❌ Throughput and latency depend heavily on the min interval and max byte settings
+- ❌ WebSocket pool/child-channel scaling does not apply
+
+**Configuration:**
+```toml
+[server]
+protocol="http-request"
+url="https://tunnel.example.com/ws"
+http_request_min_upload_ms=10
+http_request_min_download_ms=10
+http_request_max_upload_bytes=524288
+http_request_max_download_bytes=524288
+```
+
+**How it works:**
+- Client uploads encrypted GhostWire packets with HTTP `POST`
+- Client downloads queued packets with HTTP polling
+- The server may return queued download data directly in an upload response
+- The min upload/download settings limit request frequency
+- The max upload/download settings cap per-request payload size
+
 ### gRPC Protocol (`protocol="grpc"`) - CloudFlare Optimized
 
 **Best for:** CloudFlare with gRPC enabled, high-performance scenarios
@@ -373,6 +418,7 @@ location /tunnel {
 
 **Protocol Selection Guide:**
 - **Use WebSocket** if: Running through CloudFlare (most common), need maximum compatibility
+- **Use HTTP per-request** if: You need non-streaming HTTP transport but still want GhostWire security and tunneling
 - **Use gRPC** if: Running through CloudFlare with gRPC enabled, want best performance
 - **Use HTTP/2** if: Direct connection without CloudFlare, custom proxy setup
 
@@ -404,6 +450,20 @@ location /tunnel {
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_read_timeout 86400s;
+}
+```
+
+**For HTTP per-request protocol:**
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+    proxy_buffering off;
+    proxy_request_buffering off;
 }
 ```
 
