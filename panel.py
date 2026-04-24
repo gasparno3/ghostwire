@@ -122,21 +122,21 @@ def tail_log(lines=100):
 
 def get_connection_status():
     try:
-        result=subprocess.run(["systemctl","is-active","ghostwire-server"],capture_output=True,text=True,timeout=5)
+        result=subprocess.run(["systemctl","is-active",panel_config.service_name],capture_output=True,text=True,timeout=5)
         return result.stdout.strip()=="active"
     except:
         return False
 
 def restart_service():
     try:
-        subprocess.run(["systemctl","restart","ghostwire-server"],timeout=10,check=True)
+        subprocess.run(["systemctl","restart",panel_config.service_name],timeout=10,check=True)
         return True
     except:
         return False
 
 def stop_service():
     try:
-        subprocess.run(["systemctl","stop","ghostwire-server"],timeout=10,check=True)
+        subprocess.run(["systemctl","stop",panel_config.service_name],timeout=10,check=True)
         return True
     except:
         return False
