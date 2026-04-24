@@ -285,7 +285,7 @@ async def start_http_request_server(server_instance):
     handler=HTTPRequestServerHandler(server_instance)
     app=web.Application(client_max_size=max(server_instance.config.http_request_max_upload_bytes*2,1048576))
     app.router.add_route("*",server_instance.config.websocket_path,handler.handle_request)
-    runner=web.AppRunner(app)
+    runner=web.AppRunner(app,access_log=None)
     await runner.setup()
     ssl_context=None
     if hasattr(server_instance.config,"ssl_cert") and hasattr(server_instance.config,"ssl_key"):
