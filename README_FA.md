@@ -381,6 +381,22 @@ http_request_max_download_bytes=524288
 - تنظیمات min upload/download فرکانس درخواست‌ها را محدود می‌کنند
 - تنظیمات max upload/download سقف حجم هر درخواست را مشخص می‌کنند
 
+**تنظیمات nginx:**
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+    proxy_buffering off;
+    proxy_request_buffering off;
+}
+```
+
+**سازگاری با CloudFlare:** پروتکل HTTP per-request از درخواست‌های استاندارد HTTP POST/GET استفاده می‌کند، بنابراین CloudFlare آن را به‌صورت پیش‌فرض پروکسی می‌کند و نیازی به تنظیمات ویژه در داشبورد (مثل WebSockets یا gRPC) ندارد. فقط SSL/TLS را روی **Full (Strict)** تنظیم کنید. برای کاهش نرخ درخواست از طریق CloudFlare، `http_request_min_upload_ms` و `http_request_min_download_ms` را روی ۲۰۰–۵۰۰ms تنظیم کنید.
+
 ### پروتکل gRPC (protocol="grpc") - بهینه‌سازی شده برای CloudFlare
 
 بهترین برای: CloudFlare با gRPC فعال، سناریوهای عملکرد بالا
@@ -538,6 +554,7 @@ tcp_nodelay on;
 |---------|---------------------|------|
 | WebSocket | ✅ بله (با تنظیمات) | نیاز به Network → WebSockets ON |
 | gRPC | ✅ بله (با تنظیمات) | نیاز به Network → gRPC ON |
+| HTTP per-request | ✅ بله (پیش‌فرض) | HTTP معمولی — نیاز به تنظیمات ویژه CF ندارد |
 | HTTP/2 | ❌ خیر | سازگار نیست - از اتصال مستقیم استفاده کنید |
 
 **تنظیمات ضروری داشبورد CloudFlare**
@@ -555,6 +572,11 @@ tcp_nodelay on;
 3. **Speed → Rocket Loader**: خاموش کنید
 4. **Speed → Auto Minify**: همه را غیرفعال کنید (HTML، CSS، JS)
 5. **Speed → Early Hints**: خاموش کنید
+
+برای **پروتکل HTTP per-request**:
+1. **SSL/TLS → Overview**: روی **Full (Strict)** تنظیم کنید (نه "Flexible")
+2. نیازی به فعال‌سازی WebSockets یا gRPC نیست — درخواست‌های HTTP معمولی از طریق CloudFlare عبور می‌کنند
+3. برای کاهش نرخ درخواست از طریق CloudFlare، `http_request_min_upload_ms` و `http_request_min_download_ms` را روی ۲۰۰–۵۰۰ms تنظیم کنید
 
 **تنظیمات کلاینت برای CloudFlare:**
 

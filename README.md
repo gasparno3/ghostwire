@@ -388,6 +388,22 @@ http_request_max_download_bytes=524288
 - The min upload/download settings limit request frequency
 - The max upload/download settings cap per-request payload size
 
+**nginx config:**
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+    proxy_buffering off;
+    proxy_request_buffering off;
+}
+```
+
+**CloudFlare compatibility:** HTTP per-request uses standard HTTP POST/GET requests, so CloudFlare proxies it by default with no special dashboard toggles required. Set SSL/TLS to **Full (Strict)**. Increase `http_request_min_upload_ms` / `http_request_min_download_ms` to 200–500ms if you want requests to blend in with normal HTTP traffic through CloudFlare.
+
 ### gRPC Protocol (`protocol="grpc"`) - CloudFlare Optimized
 
 **Best for:** CloudFlare with gRPC enabled, high-performance scenarios
@@ -540,6 +556,7 @@ Without these timeouts, NPM will drop the persistent connection after ~60 second
 |-----------|-------------------|-------|
 | WebSocket | ✅ Yes (with config) | Requires Network → WebSockets ON |
 | gRPC | ✅ Yes (with config) | Requires Network → gRPC ON |
+| HTTP per-request | ✅ Yes (default) | Standard HTTP — no special CF settings needed |
 | HTTP/2 | ❌ No | Not compatible - use direct connection |
 
 **CRITICAL: Required CloudFlare Dashboard Settings**
@@ -557,6 +574,11 @@ For **gRPC protocol**:
 3. **Speed → Rocket Loader**: Turn OFF
 4. **Speed → Auto Minify**: Disable all (HTML, CSS, JS)
 5. **Speed → Early Hints**: Turn OFF
+
+For **HTTP per-request protocol**:
+1. **SSL/TLS → Overview**: Set to **Full (Strict)** (not "Flexible")
+2. No WebSockets or gRPC toggles needed — standard HTTP POST/GET passes through CloudFlare by default
+3. Consider setting `http_request_min_upload_ms` and `http_request_min_download_ms` to 200–500ms to reduce request rate through CloudFlare's edge
 
 **Client Configuration for CloudFlare:**
 

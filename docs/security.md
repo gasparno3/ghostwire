@@ -40,7 +40,8 @@ The AES-256-GCM authenticated encryption provides both confidentiality and integ
 
 - **WebSocket (default):** Uses `wss://` (TLS) via nginx or directly; the TLS layer protects the key exchange from passive observers
 - **gRPC / HTTP/2:** Same TLS requirement
-- **CloudFlare:** TLS is terminated at CloudFlare's edge; the RSA key exchange and PBKDF2 auth ensure tokens remain secret even from CloudFlare
+- **HTTP per-request:** Uses HTTPS for all requests; the full RSA auth and session key exchange happen on the `open`/`auth`/`key` HTTP requests before any tunnel data flows, so no streaming connection is required for the security handshake; subsequent `upload` (POST) and `poll` (GET) requests carry AES-256-GCM encrypted GhostWire frames
+- **CloudFlare:** TLS is terminated at CloudFlare's edge; the RSA key exchange and PBKDF2 auth ensure tokens remain secret even from CloudFlare; this applies to all four transports including HTTP per-request
 
 ## Token Security
 
@@ -56,4 +57,6 @@ The AES-256-GCM authenticated encryption provides both confidentiality and integ
 | Auth token protection | PBKDF2-SHA256 (100 000 iterations) + RSA-2048-OAEP |
 | Session key exchange | RSA-2048-OAEP |
 | Tunnel traffic | AES-256-GCM with per-frame random nonces |
-| Transport | TLS (WSS / HTTPS) |
+| Transport (WebSocket) | TLS via `wss://` |
+| Transport (HTTP/2 / gRPC) | TLS via `https://` |
+| Transport (HTTP per-request) | TLS via `https://`; auth and key exchange on dedicated HTTP requests before data flows |
