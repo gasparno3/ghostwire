@@ -320,9 +320,11 @@ class HTTPRequestClientTransport:
         self.recv_queue=asyncio.Queue(maxsize=512)
         self.upload_backlog=[]
         self.upload_task=None
-        self.poll_task=None
+        self.poll_tasks=[]
+        self.poll_scale_task=None
+        self.poll_full_count=0
+        self.poll_empty_count=0
         self.last_upload_time=0.0
-        self.last_poll_time=0.0
         self.last_error_log_time=0.0
         self.last_error_log_message=""
     def log_error_throttled(self,message):
@@ -344,7 +346,7 @@ class HTTPRequestClientTransport:
             return response.status,response.headers,data
     async def connect(self):
         try:
-            connector=TCPConnector(ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
+            connector=TCPConnector(limit=max(8,self.config.http_request_poll_connections+4),limit_per_host=max(8,self.config.http_request_poll_connections+4),ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
             self.session=ClientSession(connector=connector,timeout=ClientTimeout(total=None))
             status,headers,body=await self.request("POST","open",timeout_seconds=30)
             if status!=200:
@@ -371,7 +373,8 @@ class HTTPRequestClientTransport:
             self.key=unpack_session_key(session_payload,client_private_key)
             self.connected=True
             self.upload_task=asyncio.create_task(self.upload_loop())
-            self.poll_task=asyncio.create_task(self.poll_loop())
+            self.set_poll_connection_count(max(1,min(self.config.http_request_poll_min_connections,self.config.http_request_poll_connections)))
+            self.poll_scale_task=asyncio.create_task(self.poll_scale_loop())
             logger.info("HTTP request transport connected and authenticated")
             return True
         except Exception as e:
@@ -388,6 +391,42 @@ class HTTPRequestClientTransport:
             await self.recv_queue.put(None)
         except Exception:
             pass
+    def set_poll_connection_count(self,count):
+        count=max(1,min(count,self.config.http_request_poll_connections))
+        self.poll_tasks=[task for task in self.poll_tasks if not task.done()]
+        while len(self.poll_tasks)<count:
+            self.poll_tasks.append(asyncio.create_task(self.poll_loop()))
+        while len(self.poll_tasks)>count:
+            task=self.poll_tasks.pop()
+            task.cancel()
+    async def poll_scale_loop(self):
+        scale_down_count=0
+        try:
+            while not self.stop_event.is_set():
+                await asyncio.sleep(self.config.ws_pool_scale_interval)
+                self.poll_tasks=[task for task in self.poll_tasks if not task.done()]
+                current=len(self.poll_tasks)
+                target=current
+                qsize=self.recv_queue.qsize()
+                if self.poll_full_count>=max(1,current) or qsize>=self.config.ws_pool_scale_up:
+                    target=min(self.config.http_request_poll_connections,current+1)
+                    scale_down_count=0
+                elif self.poll_empty_count>=max(3,current*3) and qsize<=self.config.ws_pool_scale_down:
+                    scale_down_count+=1
+                    if scale_down_count>=3:
+                        target=max(self.config.http_request_poll_min_connections,current-1)
+                        scale_down_count=0
+                else:
+                    scale_down_count=0
+                self.poll_full_count=0
+                self.poll_empty_count=0
+                if target!=current:
+                    self.set_poll_connection_count(target)
+                    logger.info(f"HTTP request poll connections scaled to {target} (queue={qsize})")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            await self.fail_transport(e)
     async def upload_loop(self):
         try:
             while not self.stop_event.is_set():
@@ -397,10 +436,10 @@ class HTTPRequestClientTransport:
                     msg=await self.send_queue.get()
                 if msg is None:
                     break
-                now=time.time()
-                delay=(self.config.http_request_min_upload_ms/1000.0)-(now-self.last_upload_time)
-                if delay>0:
-                    await asyncio.sleep(delay)
+                if self.config.http_request_min_upload_ms>0:
+                    delay=(self.config.http_request_min_upload_ms/1000.0)-(time.time()-self.last_upload_time)
+                    if delay>0:
+                        await asyncio.sleep(delay)
                 batch=bytearray(msg)
                 while len(batch)<self.config.http_request_max_upload_bytes:
                     try:
@@ -414,37 +453,34 @@ class HTTPRequestClientTransport:
                         self.upload_backlog.insert(0,next_msg)
                         break
                     batch.extend(next_msg)
-                self.last_upload_time=time.time()
                 status,_,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                self.last_upload_time=time.time()
                 if status not in (200,204):
                     raise ValueError(f"Upload failed with HTTP {status}")
                 if data:
-                    await self.recv_queue.put(data)
                     if len(data)>=self.config.http_request_max_download_bytes:
-                        self.last_poll_time=0.0
+                        self.poll_full_count+=1
+                    await self.recv_queue.put(data)
+                else:
+                    self.poll_empty_count+=1
         except asyncio.CancelledError:
             pass
         except Exception as e:
             await self.fail_transport(e)
     async def poll_loop(self):
         try:
-            await asyncio.sleep(self.config.http_request_min_download_ms/1000.0)
             while not self.stop_event.is_set():
-                now=time.time()
-                delay=(self.config.http_request_min_download_ms/1000.0)-(now-self.last_poll_time)
-                if delay>0:
-                    await asyncio.sleep(delay)
                 status,_,data=await self.request("GET","poll",extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 if status==404:
                     raise EOFError("Connection closed")
                 if status not in (200,204):
                     raise ValueError(f"Poll failed with HTTP {status}")
                 if data:
+                    if len(data)>=self.config.http_request_max_download_bytes:
+                        self.poll_full_count+=1
                     await self.recv_queue.put(data)
-                if data and len(data)>=self.config.http_request_max_download_bytes:
-                    self.last_poll_time=0.0
                 else:
-                    self.last_poll_time=time.time()
+                    self.poll_empty_count+=1
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -465,7 +501,7 @@ class HTTPRequestClientTransport:
             await self.send_queue.put(None)
         except Exception:
             pass
-        for task in (self.upload_task,self.poll_task):
+        for task in [self.upload_task,self.poll_scale_task]+self.poll_tasks:
             if task and not task.done():
                 task.cancel()
         if self.session:
