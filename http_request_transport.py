@@ -20,6 +20,8 @@ class HTTPRequestServerSession:
         self.send_queue=asyncio.Queue(maxsize=512)
         self.control_queue=asyncio.Queue(maxsize=256)
         self.backlog=[]
+        self.outbound_seq=0
+        self.outbound_pending={}
         self.key=None
         self.closed=False
         self.close_code=None
@@ -65,7 +67,10 @@ class HTTPRequestServerSession:
         return None
     async def collect_outbound(self,max_bytes,wait_ms=0):
         if self.closed:
-            return b""
+            return 0,b""
+        if self.outbound_pending:
+            seq=min(self.outbound_pending)
+            return seq,self.outbound_pending[seq]
         batch=bytearray()
         wait_timeout=max(wait_ms,0)/1000.0
         while len(batch)<max_bytes:
@@ -78,7 +83,14 @@ class HTTPRequestServerSession:
             batch.extend(msg)
             if len(msg)>=max_bytes:
                 break
-        return bytes(batch)
+        if not batch:
+            return 0,b""
+        self.outbound_seq=(self.outbound_seq+1)%0xFFFFFFFF
+        self.outbound_pending[self.outbound_seq]=bytes(batch)
+        return self.outbound_seq,self.outbound_pending[self.outbound_seq]
+    def ack_outbound(self,ack_seq):
+        if ack_seq:
+            self.outbound_pending.pop(ack_seq,None)
 
 class HTTPRequestServerHandler:
     def __init__(self,server_instance):
@@ -226,12 +238,13 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
+            session.ack_outbound(int(request.headers.get("X-GhostWire-Ack","0") or 0))
             body=await request.read()
             await self.process_messages(session,body)
             max_bytes=max(1,int(request.headers.get("X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
-            response_body=await session.collect_outbound(max_bytes,0)
+            batch_seq,response_body=await session.collect_outbound(max_bytes,0)
             if response_body:
-                return web.Response(body=response_body,content_type="application/octet-stream")
+                return web.Response(body=response_body,headers={"X-GhostWire-Batch":str(batch_seq)},content_type="application/octet-stream")
             return web.Response(status=204)
         except Exception as e:
             logger.error(f"HTTP request upload error: {e}",exc_info=True)
@@ -242,11 +255,12 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
+            session.ack_outbound(int(request.headers.get("X-GhostWire-Ack","0") or 0))
             max_bytes=max(1,int(request.headers.get("X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
             wait_ms=max(0,int(request.headers.get("X-GhostWire-Wait-Ms",self.server.config.http_request_min_download_ms)))
-            response_body=await session.collect_outbound(max_bytes,wait_ms)
+            batch_seq,response_body=await session.collect_outbound(max_bytes,wait_ms)
             if response_body:
-                return web.Response(body=response_body,content_type="application/octet-stream")
+                return web.Response(body=response_body,headers={"X-GhostWire-Batch":str(batch_seq)},content_type="application/octet-stream")
             return web.Response(status=204)
         except Exception as e:
             logger.error(f"HTTP request poll error: {e}",exc_info=True)
@@ -327,6 +341,8 @@ class HTTPRequestClientTransport:
         self.last_upload_time=0.0
         self.last_error_log_time=0.0
         self.last_error_log_message=""
+        self.pending_ack=0
+        self.received_batches=set()
     def log_error_throttled(self,message):
         now=time.time()
         if message!=self.last_error_log_message or now-self.last_error_log_time>=10:
@@ -341,9 +357,23 @@ class HTTPRequestClientTransport:
             params["sid"]=self.session_id
         if extra_headers:
             headers.update(extra_headers)
+        if self.pending_ack:
+            headers["X-GhostWire-Ack"]=str(self.pending_ack)
         async with self.session.request(method,self.server_url,params=params,data=body,headers=headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds)) as response:
             data=await response.read()
             return response.status,response.headers,data
+    def mark_batch_received(self,headers):
+        batch_seq=int(headers.get("X-GhostWire-Batch","0") or 0)
+        if batch_seq:
+            if batch_seq in self.received_batches:
+                self.pending_ack=batch_seq
+                return False
+            self.pending_ack=batch_seq
+            self.received_batches.add(batch_seq)
+            if len(self.received_batches)>1024:
+                self.received_batches.clear()
+                self.received_batches.add(batch_seq)
+        return True
     async def connect(self):
         try:
             connector=TCPConnector(limit=max(8,self.config.http_request_poll_connections+4),limit_per_host=max(8,self.config.http_request_poll_connections+4),ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
@@ -453,11 +483,13 @@ class HTTPRequestClientTransport:
                         self.upload_backlog.insert(0,next_msg)
                         break
                     batch.extend(next_msg)
-                status,_,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 self.last_upload_time=time.time()
                 if status not in (200,204):
                     raise ValueError(f"Upload failed with HTTP {status}")
                 if data:
+                    if not self.mark_batch_received(headers):
+                        continue
                     if len(data)>=self.config.http_request_max_download_bytes:
                         self.poll_full_count+=1
                     await self.recv_queue.put(data)
@@ -470,12 +502,14 @@ class HTTPRequestClientTransport:
     async def poll_loop(self):
         try:
             while not self.stop_event.is_set():
-                status,_,data=await self.request("GET","poll",extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                status,headers,data=await self.request("GET","poll",extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 if status==404:
                     raise EOFError("Connection closed")
                 if status not in (200,204):
                     raise ValueError(f"Poll failed with HTTP {status}")
                 if data:
+                    if not self.mark_batch_received(headers):
+                        continue
                     if len(data)>=self.config.http_request_max_download_bytes:
                         self.poll_full_count+=1
                     await self.recv_queue.put(data)
