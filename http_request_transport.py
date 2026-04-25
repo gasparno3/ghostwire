@@ -4,7 +4,7 @@ import logging
 import os
 import ssl
 import time
-from aiohttp import ClientSession,ClientTimeout,TCPConnector,web
+from aiohttp import ClientError,ClientSession,ClientTimeout,TCPConnector,web
 from urllib.parse import urlparse
 from protocol import *
 from auth import validate_token
@@ -483,10 +483,17 @@ class HTTPRequestClientTransport:
                         self.upload_backlog.insert(0,next_msg)
                         break
                     batch.extend(next_msg)
-                status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                try:
+                    status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
+                    self.log_error_throttled(f"HTTP request upload disconnected, retrying: {e}")
+                    await asyncio.sleep(0.1)
+                    continue
                 self.last_upload_time=time.time()
                 if status not in (200,204):
-                    raise ValueError(f"Upload failed with HTTP {status}")
+                    self.log_error_throttled(f"HTTP request upload failed with HTTP {status}, retrying")
+                    await asyncio.sleep(0.1)
+                    continue
                 if data:
                     if not self.mark_batch_received(headers):
                         continue
@@ -502,11 +509,18 @@ class HTTPRequestClientTransport:
     async def poll_loop(self):
         try:
             while not self.stop_event.is_set():
-                status,headers,data=await self.request("GET","poll",extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                try:
+                    status,headers,data=await self.request("GET","poll",extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
+                    self.log_error_throttled(f"HTTP request poll disconnected, retrying: {e}")
+                    await asyncio.sleep(0.1)
+                    continue
                 if status==404:
                     raise EOFError("Connection closed")
                 if status not in (200,204):
-                    raise ValueError(f"Poll failed with HTTP {status}")
+                    self.log_error_throttled(f"HTTP request poll failed with HTTP {status}, retrying")
+                    await asyncio.sleep(0.1)
+                    continue
                 if data:
                     if not self.mark_batch_received(headers):
                         continue
