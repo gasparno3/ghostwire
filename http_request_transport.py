@@ -405,6 +405,9 @@ class HTTPRequestClientTransport:
             self.last_error_log_message=message
     async def request(self,method,action,body=b"",extra_headers=None,timeout_seconds=30):
         headers=dict(self.headers)
+        user_agent=getattr(self.config,"user_agent","")
+        if user_agent:
+            headers.setdefault("User-Agent",user_agent)
         params=list(self.base_params)+[("action",action)]
         if self.body_mode:
             body=base64.b64encode(body) if body else b""
@@ -422,7 +425,7 @@ class HTTPRequestClientTransport:
                 params.append(("ack",str(self.pending_ack)))
             else:
                 headers[HDR_ACK]=str(self.pending_ack)
-        async with self.session.request(method,self.server_url,params=params,data=body,headers=headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds)) as response:
+        async with self.session.request(method,self.server_url,params=params,data=body,headers=headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds),allow_redirects=getattr(self.config,"allow_redirects",True)) as response:
             data=await response.read()
             return response.status,response.headers,data
     def mark_batch_received(self,batch_seq):

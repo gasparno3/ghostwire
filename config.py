@@ -149,6 +149,8 @@ class ClientConfig:
         self.update_https_proxy=server.get("update_https_proxy","")
         self.http_proxy=server.get("http_proxy","")
         self.https_proxy=server.get("https_proxy","")
+        self.user_agent=server.get("user_agent","")
+        self.allow_redirects=server.get("allow_redirects",True)
         self.direct_http_proxy=server.get("direct_http_proxy","")
         self.direct_https_proxy=server.get("direct_https_proxy","")
         self.mode=config["server"].get("mode","reverse")
