@@ -5,7 +5,7 @@ import os
 import ssl
 import time
 from aiohttp import ClientError,ClientSession,ClientTimeout,TCPConnector,web
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl,urlparse,urlunparse
 from protocol import *
 from auth import validate_token
 
@@ -319,7 +319,9 @@ async def start_http_request_server(server_instance):
 
 class HTTPRequestClientTransport:
     def __init__(self,server_url,token,config,headers=None,proxy=None,ssl_context=None):
-        self.server_url=server_url.replace("wss://","https://").replace("ws://","http://")
+        parsed=urlparse(server_url.replace("wss://","https://").replace("ws://","http://"))
+        self.server_url=urlunparse((parsed.scheme,parsed.netloc,parsed.path,parsed.params,"",parsed.fragment))
+        self.base_params=parse_qsl(parsed.query,keep_blank_values=True)
         self.token=token
         self.config=config
         self.headers=headers or {}
@@ -352,10 +354,10 @@ class HTTPRequestClientTransport:
             self.last_error_log_message=message
     async def request(self,method,action,body=b"",extra_headers=None,timeout_seconds=30):
         headers=dict(self.headers)
-        params={"action":action}
+        params=list(self.base_params)+[("action",action)]
         if self.session_id:
             headers["X-GhostWire-Session"]=self.session_id
-            params["sid"]=self.session_id
+            params.append(("sid",self.session_id))
         if extra_headers:
             headers.update(extra_headers)
         if self.pending_ack:
@@ -380,27 +382,27 @@ class HTTPRequestClientTransport:
             connector=TCPConnector(limit=max(8,self.config.http_request_poll_connections+4),limit_per_host=max(8,self.config.http_request_poll_connections+4),ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
             self.session=ClientSession(connector=connector,timeout=ClientTimeout(total=None))
             status,headers,body=await self.request("POST","open",timeout_seconds=30)
-            if status!=200:
-                raise ValueError(f"Open failed with HTTP {status}")
             self.session_id=headers.get("X-GhostWire-Session","")
             if not self.session_id:
                 raise ValueError("Missing session id")
-            msg_type,_,pubkey_bytes,_=await unpack_message(body,None)
-            if msg_type!=MSG_PUBKEY:
-                raise ValueError("Expected public key from server")
+            try:
+                msg_type,_,pubkey_bytes,_=await unpack_message(body,None)
+                if msg_type!=MSG_PUBKEY:
+                    raise ValueError("Expected public key from server")
+            except Exception as e:
+                raise ValueError(f"Open failed with HTTP {status}: {e}")
             server_public_key,auth_salt=unpack_pubkey_payload(pubkey_bytes)
             client_private_key,client_public_key=generate_rsa_keypair()
             auth_msg=pack_auth_message(self.token,server_public_key,role="main",auth_salt=auth_salt)
             pubkey_msg=pack_pubkey(client_public_key)
             status,_,_=await self.request("POST","auth",body=auth_msg,timeout_seconds=30)
-            if status not in (200,204):
-                raise ValueError(f"Auth failed with HTTP {status}")
             status,_,body=await self.request("POST","key",body=pubkey_msg,timeout_seconds=30)
-            if status!=200:
-                raise ValueError(f"Key exchange failed with HTTP {status}")
-            session_type,_,session_payload,_=await unpack_message(body,None)
-            if session_type!=MSG_SESSION_KEY:
-                raise ValueError("Expected session key from server")
+            try:
+                session_type,_,session_payload,_=await unpack_message(body,None)
+                if session_type!=MSG_SESSION_KEY:
+                    raise ValueError("Expected session key from server")
+            except Exception as e:
+                raise ValueError(f"Key exchange failed with HTTP {status}: {e}")
             self.key=unpack_session_key(session_payload,client_private_key)
             self.connected=True
             self.upload_task=asyncio.create_task(self.upload_loop())
@@ -511,11 +513,15 @@ class HTTPRequestClientTransport:
                     await asyncio.sleep(0.1)
                     continue
                 self.last_upload_time=time.time()
-                if status not in (200,204):
+                if status not in (200,204) and not data:
                     self.log_error_throttled(f"HTTP request upload failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
                     continue
                 if data:
+                    if not headers.get("X-GhostWire-Batch"):
+                        self.log_error_throttled(f"HTTP request upload returned non-GhostWire body with HTTP {status}, retrying")
+                        await asyncio.sleep(0.1)
+                        continue
                     if not self.mark_batch_received(headers):
                         continue
                     if len(data)>=self.config.http_request_max_download_bytes:
@@ -536,13 +542,15 @@ class HTTPRequestClientTransport:
                     self.log_error_throttled(f"HTTP request poll disconnected, retrying: {e}")
                     await asyncio.sleep(0.1)
                     continue
-                if status==404:
-                    raise EOFError("Connection closed")
-                if status not in (200,204):
+                if status not in (200,204) and not data:
                     self.log_error_throttled(f"HTTP request poll failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
                     continue
                 if data:
+                    if not headers.get("X-GhostWire-Batch"):
+                        self.log_error_throttled(f"HTTP request poll returned non-GhostWire body with HTTP {status}, retrying")
+                        await asyncio.sleep(0.1)
+                        continue
                     if not self.mark_batch_received(headers):
                         continue
                     if len(data)>=self.config.http_request_max_download_bytes:
