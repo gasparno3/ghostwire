@@ -1157,7 +1157,7 @@ class GhostWireClient:
         self.tunnel_manager.add_connection(conn_id,(reader,writer))
         logger.debug(f"New direct local connection {conn_id} -> {remote_ip}:{remote_port}")
         try:
-            if not self.main_websocket:
+            if not self.main_websocket and not (self.config.protocol=="http-request" and self.http_request_transport and self.http_request_transport.connected):
                 logger.error(f"No server connected, dropping direct connection {conn_id}")
                 self.tunnel_manager.remove_connection(conn_id)
                 return
@@ -1168,12 +1168,16 @@ class GhostWireClient:
                 logger.error(f"Control queue unavailable, dropping direct connection {conn_id}")
                 self.tunnel_manager.remove_connection(conn_id)
                 return
+            if self.config.protocol=="http-request" and self.http_request_transport:
+                self.http_request_transport.add_poll_user()
             connect_msg=await pack_connect(conn_id,remote_ip,remote_port,self.key)
             try:
                 control_queue.put_nowait(connect_msg)
             except (asyncio.QueueFull,AttributeError):
                 logger.error(f"Control queue unavailable, dropping direct connection {conn_id}")
                 self.tunnel_manager.remove_connection(conn_id)
+                if self.config.protocol=="http-request" and self.http_request_transport:
+                    self.http_request_transport.remove_poll_user()
                 return
             self.conn_channel_map[conn_id]=channel_id
             asyncio.create_task(self.forward_direct_local_to_ws(conn_id,reader))
@@ -1217,6 +1221,8 @@ class GhostWireClient:
             self.conn_channel_map.pop(conn_id,None)
             self.clear_conn_data_state(conn_id)
             self.tunnel_manager.remove_connection(conn_id)
+            if self.config.protocol=="http-request" and self.http_request_transport:
+                self.http_request_transport.remove_poll_user()
 
     async def run(self):
         self.running=True
@@ -1239,6 +1245,8 @@ class GhostWireClient:
                     elif self.config.protocol=="http-request":
                         sender_task=asyncio.create_task(self.http2_sender_task(self.http_request_transport,send_queue,control_queue,stop_event))
                         receive_task=asyncio.create_task(self.grpc_receive_messages(self.http_request_transport,"main"))
+                        if self.config.mode=="direct" and not self.direct_listeners:
+                            await self.start_direct_listeners()
                     elif self.config.protocol=="grpc":
                         sender_task=asyncio.create_task(self.http2_sender_task(self.grpc_transport,send_queue,control_queue,stop_event))
                         receive_task=asyncio.create_task(self.grpc_receive_messages(self.grpc_transport,"main"))

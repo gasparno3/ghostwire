@@ -343,6 +343,7 @@ class HTTPRequestClientTransport:
         self.last_error_log_message=""
         self.pending_ack=0
         self.received_batches=set()
+        self.active_poll_users=0
     def log_error_throttled(self,message):
         now=time.time()
         if message!=self.last_error_log_message or now-self.last_error_log_time>=10:
@@ -403,8 +404,8 @@ class HTTPRequestClientTransport:
             self.key=unpack_session_key(session_payload,client_private_key)
             self.connected=True
             self.upload_task=asyncio.create_task(self.upload_loop())
-            self.set_poll_connection_count(max(1,min(self.config.http_request_poll_min_connections,self.config.http_request_poll_connections)))
-            self.poll_scale_task=asyncio.create_task(self.poll_scale_loop())
+            if getattr(self.config,"mode","reverse")!="direct":
+                self.start_polling()
             logger.info("HTTP request transport connected and authenticated")
             return True
         except Exception as e:
@@ -429,6 +430,26 @@ class HTTPRequestClientTransport:
         while len(self.poll_tasks)>count:
             task=self.poll_tasks.pop()
             task.cancel()
+    def start_polling(self):
+        self.set_poll_connection_count(max(1,min(self.config.http_request_poll_min_connections,self.config.http_request_poll_connections)))
+        if not self.poll_scale_task or self.poll_scale_task.done():
+            self.poll_scale_task=asyncio.create_task(self.poll_scale_loop())
+    def stop_polling(self):
+        for task in self.poll_tasks:
+            if task and not task.done():
+                task.cancel()
+        self.poll_tasks=[]
+        if self.poll_scale_task and not self.poll_scale_task.done():
+            self.poll_scale_task.cancel()
+        self.poll_scale_task=None
+    def add_poll_user(self):
+        self.active_poll_users+=1
+        if getattr(self.config,"mode","reverse")=="direct" and self.connected:
+            self.start_polling()
+    def remove_poll_user(self):
+        self.active_poll_users=max(0,self.active_poll_users-1)
+        if getattr(self.config,"mode","reverse")=="direct" and self.active_poll_users==0:
+            self.stop_polling()
     async def poll_scale_loop(self):
         scale_down_count=0
         try:
