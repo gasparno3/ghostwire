@@ -1,5 +1,6 @@
 #!/usr/bin/env python3.13
 import asyncio
+import base64
 import logging
 import os
 import ssl
@@ -10,6 +11,30 @@ from protocol import *
 from auth import validate_token
 
 logger=logging.getLogger(__name__)
+BODY_MAGIC=b"GWBODY1\n"
+
+def pack_body_response(payload=b"",session_id="",batch_seq=0):
+    meta=[]
+    if session_id:
+        meta.append(f"session={session_id}".encode())
+    if batch_seq:
+        meta.append(f"batch={batch_seq}".encode())
+    return BODY_MAGIC+b"\n".join(meta)+b"\n\n"+base64.b64encode(payload)
+
+def unpack_body_response(data):
+    if not data.startswith(BODY_MAGIC):
+        return {},data
+    header,payload=data[len(BODY_MAGIC):].split(b"\n\n",1)
+    meta={}
+    for line in header.splitlines():
+        key,_,value=line.partition(b"=")
+        if key:
+            meta[key.decode()]=value.decode()
+    return meta,base64.b64decode(payload) if payload else b""
+
+async def read_body_payload(request,body_mode):
+    body=await request.read()
+    return base64.b64decode(body) if body_mode and body else body
 
 class HTTPRequestServerSession:
     def __init__(self,handler,session_id,auth_salt):
@@ -95,6 +120,7 @@ class HTTPRequestServerSession:
 class HTTPRequestServerHandler:
     def __init__(self,server_instance):
         self.server=server_instance
+        self.body_mode=server_instance.config.protocol=="http-request-body"
         self.private_key=server_instance.private_key
         self.public_key=server_instance.public_key
         self.token=server_instance.config.token
@@ -104,7 +130,7 @@ class HTTPRequestServerHandler:
     def make_session_id(self):
         return os.urandom(16).hex()
     def get_session_id(self,request):
-        return request.headers.get("X-GhostWire-Session","") or request.query.get("sid","")
+        return request.query.get("sid","") or request.headers.get("X-GhostWire-Session","")
     def get_session(self,request):
         session_id=self.get_session_id(request)
         if not session_id:
@@ -129,13 +155,16 @@ class HTTPRequestServerHandler:
         session_id=self.make_session_id()
         auth_salt=os.urandom(AUTH_SALT_SIZE)
         self.pending_sessions[session_id]={"auth_salt":auth_salt,"created_at":time.time(),"auth_ok":False}
-        return web.Response(body=pack_pubkey(self.public_key,auth_salt),headers={"X-GhostWire-Session":session_id},content_type="application/octet-stream")
+        body=pack_pubkey(self.public_key,auth_salt)
+        if self.body_mode:
+            return web.Response(body=pack_body_response(body,session_id=session_id),content_type="text/plain")
+        return web.Response(body=body,headers={"X-GhostWire-Session":session_id},content_type="application/octet-stream")
     async def handle_auth(self,request):
         session_id=self.get_session_id(request)
         pending=self.pending_sessions.get(session_id)
         if not pending:
             return web.Response(status=404)
-        body=await request.read()
+        body=await read_body_payload(request,self.body_mode)
         async with self.server.auth_lock:
             if self.server.main_websocket is not None:
                 return web.Response(status=409)
@@ -161,6 +190,8 @@ class HTTPRequestServerHandler:
             except Exception as e:
                 logger.warning(f"HTTP request auth failed: {e}")
                 return web.Response(status=400)
+            if self.body_mode:
+                return web.Response(body=pack_body_response(session_id=session_id),content_type="text/plain")
             return web.Response(status=204,headers={"X-GhostWire-Session":session_id})
     async def handle_key(self,request):
         session_id=self.get_session_id(request)
@@ -174,7 +205,7 @@ class HTTPRequestServerHandler:
                 logger.warning("HTTP request key exchange failed: auth step missing")
                 return web.Response(status=400)
             try:
-                body=await request.read()
+                body=await read_body_payload(request,self.body_mode)
                 return await self.finish_key_exchange(session_id,pending,body)
             except Exception as e:
                 logger.warning(f"HTTP request key exchange failed: {e}")
@@ -205,7 +236,10 @@ class HTTPRequestServerHandler:
         if not self.server.listeners and self.server.mode_is_server_listen():
             await self.server.start_listeners()
         logger.info("HTTP request client authenticated")
-        return web.Response(body=pack_session_key(session.key,client_public_key),headers={"X-GhostWire-Session":session_id},content_type="application/octet-stream")
+        body=pack_session_key(session.key,client_public_key)
+        if self.body_mode:
+            return web.Response(body=pack_body_response(body,session_id=session_id),content_type="text/plain")
+        return web.Response(body=body,headers={"X-GhostWire-Session":session_id},content_type="application/octet-stream")
     async def process_messages(self,session,body):
         buffer=bytearray(body)
         session.touch()
@@ -238,13 +272,17 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
-            session.ack_outbound(int(request.headers.get("X-GhostWire-Ack","0") or 0))
-            body=await request.read()
+            session.ack_outbound(int(request.query.get("ack","") or request.headers.get("X-GhostWire-Ack","0") or 0))
+            body=await read_body_payload(request,self.body_mode)
             await self.process_messages(session,body)
-            max_bytes=max(1,int(request.headers.get("X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
+            max_bytes=max(1,int(request.query.get("max","") or request.headers.get("X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
             batch_seq,response_body=await session.collect_outbound(max_bytes,0)
             if response_body:
+                if self.body_mode:
+                    return web.Response(body=pack_body_response(response_body,batch_seq=batch_seq),content_type="text/plain")
                 return web.Response(body=response_body,headers={"X-GhostWire-Batch":str(batch_seq)},content_type="application/octet-stream")
+            if self.body_mode:
+                return web.Response(body=pack_body_response(),content_type="text/plain")
             return web.Response(status=204)
         except Exception as e:
             logger.error(f"HTTP request upload error: {e}",exc_info=True)
@@ -255,12 +293,16 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
-            session.ack_outbound(int(request.headers.get("X-GhostWire-Ack","0") or 0))
-            max_bytes=max(1,int(request.headers.get("X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
-            wait_ms=max(0,int(request.headers.get("X-GhostWire-Wait-Ms",self.server.config.http_request_min_download_ms)))
+            session.ack_outbound(int(request.query.get("ack","") or request.headers.get("X-GhostWire-Ack","0") or 0))
+            max_bytes=max(1,int(request.query.get("max","") or request.headers.get("X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
+            wait_ms=max(0,int(request.query.get("wait","") or request.headers.get("X-GhostWire-Wait-Ms",self.server.config.http_request_min_download_ms)))
             batch_seq,response_body=await session.collect_outbound(max_bytes,wait_ms)
             if response_body:
+                if self.body_mode:
+                    return web.Response(body=pack_body_response(response_body,batch_seq=batch_seq),content_type="text/plain")
                 return web.Response(body=response_body,headers={"X-GhostWire-Batch":str(batch_seq)},content_type="application/octet-stream")
+            if self.body_mode:
+                return web.Response(body=pack_body_response(),content_type="text/plain")
             return web.Response(status=204)
         except Exception as e:
             logger.error(f"HTTP request poll error: {e}",exc_info=True)
@@ -322,6 +364,7 @@ class HTTPRequestClientTransport:
         parsed=urlparse(server_url.replace("wss://","https://").replace("ws://","http://"))
         self.server_url=urlunparse((parsed.scheme,parsed.netloc,parsed.path,parsed.params,"",parsed.fragment))
         self.base_params=parse_qsl(parsed.query,keep_blank_values=True)
+        self.body_mode=config.protocol=="http-request-body"
         self.token=token
         self.config=config
         self.headers=headers or {}
@@ -355,18 +398,26 @@ class HTTPRequestClientTransport:
     async def request(self,method,action,body=b"",extra_headers=None,timeout_seconds=30):
         headers=dict(self.headers)
         params=list(self.base_params)+[("action",action)]
+        if self.body_mode:
+            body=base64.b64encode(body) if body else b""
         if self.session_id:
-            headers["X-GhostWire-Session"]=self.session_id
             params.append(("sid",self.session_id))
+            if not self.body_mode:
+                headers["X-GhostWire-Session"]=self.session_id
         if extra_headers:
-            headers.update(extra_headers)
+            if self.body_mode:
+                params.extend(extra_headers.items())
+            else:
+                headers.update(extra_headers)
         if self.pending_ack:
-            headers["X-GhostWire-Ack"]=str(self.pending_ack)
+            if self.body_mode:
+                params.append(("ack",str(self.pending_ack)))
+            else:
+                headers["X-GhostWire-Ack"]=str(self.pending_ack)
         async with self.session.request(method,self.server_url,params=params,data=body,headers=headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds)) as response:
             data=await response.read()
             return response.status,response.headers,data
-    def mark_batch_received(self,headers):
-        batch_seq=int(headers.get("X-GhostWire-Batch","0") or 0)
+    def mark_batch_received(self,batch_seq):
         if batch_seq:
             if batch_seq in self.received_batches:
                 self.pending_ack=batch_seq
@@ -382,7 +433,10 @@ class HTTPRequestClientTransport:
             connector=TCPConnector(limit=max(8,self.config.http_request_poll_connections+4),limit_per_host=max(8,self.config.http_request_poll_connections+4),ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
             self.session=ClientSession(connector=connector,timeout=ClientTimeout(total=None))
             status,headers,body=await self.request("POST","open",timeout_seconds=30)
-            self.session_id=headers.get("X-GhostWire-Session","")
+            meta={}
+            if self.body_mode:
+                meta,body=unpack_body_response(body)
+            self.session_id=meta.get("session","") or headers.get("X-GhostWire-Session","")
             if not self.session_id:
                 raise ValueError("Missing session id")
             try:
@@ -397,6 +451,8 @@ class HTTPRequestClientTransport:
             pubkey_msg=pack_pubkey(client_public_key)
             status,_,_=await self.request("POST","auth",body=auth_msg,timeout_seconds=30)
             status,_,body=await self.request("POST","key",body=pubkey_msg,timeout_seconds=30)
+            if self.body_mode:
+                _,body=unpack_body_response(body)
             try:
                 session_type,_,session_payload,_=await unpack_message(body,None)
                 if session_type!=MSG_SESSION_KEY:
@@ -507,7 +563,7 @@ class HTTPRequestClientTransport:
                         break
                     batch.extend(next_msg)
                 try:
-                    status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                    status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"max":str(self.config.http_request_max_download_bytes)} if self.body_mode else {"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
                     self.log_error_throttled(f"HTTP request upload disconnected, retrying: {e}")
                     await asyncio.sleep(0.1)
@@ -518,11 +574,18 @@ class HTTPRequestClientTransport:
                     await asyncio.sleep(0.1)
                     continue
                 if data:
-                    if not headers.get("X-GhostWire-Batch"):
+                    meta={}
+                    if self.body_mode:
+                        meta,data=unpack_body_response(data)
+                    batch_seq=int(meta.get("batch","") or headers.get("X-GhostWire-Batch","0") or 0)
+                    if not self.body_mode and not batch_seq:
                         self.log_error_throttled(f"HTTP request upload returned non-GhostWire body with HTTP {status}, retrying")
                         await asyncio.sleep(0.1)
                         continue
-                    if not self.mark_batch_received(headers):
+                    if self.body_mode and not data:
+                        self.poll_empty_count+=1
+                        continue
+                    if not self.mark_batch_received(batch_seq):
                         continue
                     if len(data)>=self.config.http_request_max_download_bytes:
                         self.poll_full_count+=1
@@ -537,7 +600,7 @@ class HTTPRequestClientTransport:
         try:
             while not self.stop_event.is_set():
                 try:
-                    status,headers,data=await self.request("GET","poll",extra_headers={"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(self.config.http_request_min_download_ms)} if self.body_mode else {"X-GhostWire-Max-Download-Bytes":str(self.config.http_request_max_download_bytes),"X-GhostWire-Wait-Ms":str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
                     self.log_error_throttled(f"HTTP request poll disconnected, retrying: {e}")
                     await asyncio.sleep(0.1)
@@ -547,11 +610,18 @@ class HTTPRequestClientTransport:
                     await asyncio.sleep(0.1)
                     continue
                 if data:
-                    if not headers.get("X-GhostWire-Batch"):
+                    meta={}
+                    if self.body_mode:
+                        meta,data=unpack_body_response(data)
+                    batch_seq=int(meta.get("batch","") or headers.get("X-GhostWire-Batch","0") or 0)
+                    if not self.body_mode and not batch_seq:
                         self.log_error_throttled(f"HTTP request poll returned non-GhostWire body with HTTP {status}, retrying")
                         await asyncio.sleep(0.1)
                         continue
-                    if not self.mark_batch_received(headers):
+                    if self.body_mode and not data:
+                        self.poll_empty_count+=1
+                        continue
+                    if not self.mark_batch_received(batch_seq):
                         continue
                     if len(data)>=self.config.http_request_max_download_bytes:
                         self.poll_full_count+=1
