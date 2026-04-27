@@ -411,6 +411,7 @@ class HTTPRequestClientTransport:
         params=list(self.base_params)+[("action",action)]
         if self.body_mode:
             body=base64.b64encode(body) if body else b""
+            headers.setdefault("Content-Type","text/plain; charset=utf-8")
         if self.session_id:
             params.append(("sid",self.session_id))
             if not self.body_mode:
