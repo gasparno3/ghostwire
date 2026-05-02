@@ -279,6 +279,26 @@ level="info"
 file="/var/log/ghostwire-client.log"
 ```
 
+Google Apps Script domain-fronting example for `http-request-body`:
+
+```toml
+[server]
+protocol="http-request-body"
+url="https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
+allow_redirects=true
+domain_fronting_host="script.googleusercontent.com"
+domain_fronting_target="www.google.com"
+domain_fronting_sni="www.google.com"
+```
+
+With a configured IP instead of `www.google.com`:
+
+```toml
+domain_fronting_host="script.googleusercontent.com"
+domain_fronting_target="142.250.190.36"
+domain_fronting_sni="www.google.com"
+```
+
 ### Auto-Update Configuration
 
 Both server and client support automatic updates from GitHub releases:

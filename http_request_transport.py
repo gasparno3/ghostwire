@@ -515,7 +515,8 @@ class HTTPRequestClientTransport:
                 meta,body=unpack_body_response(body)
             self.session_id=meta.get("session","") or header_get(headers,HDR_SESSION,"X-GhostWire-Session")
             if not self.session_id:
-                raise ValueError("Missing session id")
+                preview=body[:160].decode("utf-8","replace").replace("\n"," ")
+                raise ValueError(f"Missing session id from HTTP {status}: {preview}")
             try:
                 msg_type,_,pubkey_bytes,_=await unpack_message(body,None)
                 if msg_type!=MSG_PUBKEY:
