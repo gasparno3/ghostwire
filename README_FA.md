@@ -224,6 +224,7 @@ host_header=""             # بازنویسی هدر Host (پیش‌فرض: دا
 domain_fronting_host=""    # hostname برای بازنویسی بعد از redirect، مثلا script.googleusercontent.com
 domain_fronting_target=""  # hostname/IP مقصد اتصال، مثلا www.google.com یا IP دلخواه
 domain_fronting_sni=""     # مقدار TLS SNI برای مقصد domain fronting
+gas_script_id=""           # Deployment ID در Apps Script؛ آدرس /macros/s/{id}/exec را می‌سازد
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true

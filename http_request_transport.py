@@ -402,6 +402,8 @@ async def start_http_request_server(server_instance):
 
 class HTTPRequestClientTransport:
     def __init__(self,server_url,token,config,headers=None,proxy=None,ssl_context=None):
+        if getattr(config,"gas_script_id",""):
+            server_url=f"https://script.google.com/macros/s/{config.gas_script_id}/exec"
         parsed=urlparse(server_url.replace("wss://","https://").replace("ws://","http://"))
         self.server_url=urlunparse((parsed.scheme,parsed.netloc,parsed.path,parsed.params,"",parsed.fragment))
         self.base_params=parse_qsl(parsed.query,keep_blank_values=True)
@@ -437,6 +439,8 @@ class HTTPRequestClientTransport:
             logger.error(message)
             self.last_error_log_time=now
             self.last_error_log_message=message
+    def format_error(self,e):
+        return str(e) or e.__class__.__name__
     def is_idle(self):
         return getattr(self.config,"mode","reverse")=="direct" and time.time()-self.last_activity_time>=max(1,self.config.ping_interval)
     def apply_domain_fronting(self,url,headers):
@@ -445,11 +449,12 @@ class HTTPRequestClientTransport:
         if not host or not target:
             return url,headers,None
         parsed=urlparse(url)
-        if parsed.hostname!=host:
+        gas_hosts=("script.google.com","script.googleusercontent.com") if getattr(self.config,"gas_script_id","") else ()
+        if parsed.hostname!=host and parsed.hostname not in gas_hosts:
             return url,headers,None
         port=f":{parsed.port}" if parsed.port else ""
         new_headers=dict(headers)
-        new_headers["Host"]=host
+        new_headers["Host"]=parsed.hostname
         modified=url.replace(f"{parsed.scheme}://{parsed.hostname}{port}",f"{parsed.scheme}://{target}{port}",1)
         return modified,new_headers,getattr(self.config,"domain_fronting_sni","") or target
     async def request(self,method,action,body=b"",extra_headers=None,timeout_seconds=30):
@@ -487,6 +492,8 @@ class HTTPRequestClientTransport:
         current_body=body
         for _ in range(10):
             request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
+            if request_url!=current_url:
+                logger.debug(f"HTTP request rewrite: {current_url} -> {request_url} host={request_headers.get('Host','')} sni={sni_host or ''}")
             async with self.session.request(current_method,request_url,params=params,data=current_body,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds),allow_redirects=False,server_hostname=sni_host) as response:
                 data=await response.read()
                 if not getattr(self.config,"allow_redirects",True) or response.status not in (301,302,303,307,308) or "Location" not in response.headers:
@@ -551,13 +558,13 @@ class HTTPRequestClientTransport:
             logger.info("HTTP request transport connected and authenticated")
             return True
         except Exception as e:
-            self.log_error_throttled(f"HTTP request connection failed: {e}")
+            self.log_error_throttled(f"HTTP request connection failed: {self.format_error(e)}")
             await self.close()
             return False
     async def fail_transport(self,e):
         if self.stop_event.is_set():
             return
-        self.log_error_throttled(f"HTTP request transport error: {e}")
+        self.log_error_throttled(f"HTTP request transport error: {self.format_error(e)}")
         self.stop_event.set()
         self.connected=False
         try:
@@ -652,7 +659,7 @@ class HTTPRequestClientTransport:
                 try:
                     status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"max":str(self.config.http_request_max_download_bytes)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
-                    self.log_error_throttled(f"HTTP request upload disconnected, retrying: {e}")
+                    self.log_error_throttled(f"HTTP request upload disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
                     continue
                 self.last_upload_time=time.time()
@@ -692,7 +699,7 @@ class HTTPRequestClientTransport:
                     wait_ms=self.config.ping_interval*1000 if self.is_idle() else self.config.http_request_min_download_ms
                     status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(wait_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(wait_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
-                    self.log_error_throttled(f"HTTP request poll disconnected, retrying: {e}")
+                    self.log_error_throttled(f"HTTP request poll disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
                     continue
                 if status not in (200,204) and not data:

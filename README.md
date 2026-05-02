@@ -250,6 +250,7 @@ host_header=""             # override Host header (default: original domain when
 domain_fronting_host=""    # hostname to rewrite after redirects, e.g. script.googleusercontent.com
 domain_fronting_target=""  # connect hostname/IP, e.g. www.google.com or a configured IP
 domain_fronting_sni=""     # TLS SNI used for domain fronting target
+gas_script_id=""           # Apps Script deployment ID; builds https://script.google.com/macros/s/{id}/exec
 service_name="ghostwire-client"  # systemd service name for auto-restart after update
 ws_send_batch_bytes=65536  # Max bytes per WebSocket frame (default: 65536)
 http_request_min_upload_ms=50      # Minimum delay between upload requests
@@ -287,14 +288,15 @@ Google Apps Script domain-fronting example for `http-request-body`:
 [server]
 protocol="http-request-body"
 url="https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
+gas_script_id="YOUR_DEPLOYMENT_ID"
 allow_redirects=true
 http_request_body_param="data"
-domain_fronting_host="script.googleusercontent.com"
+domain_fronting_host="script.google.com"
 domain_fronting_target="www.google.com"
 domain_fronting_sni="www.google.com"
 ```
 
-`http-request-body` uses GET-only requests and carries the GhostWire request envelope in the query parameter named by `http_request_body_param` for Google Apps Script compatibility. Configure the same value on both client and server.
+`gas_script_id` makes GhostWire start at `script.google.com/macros/s/{id}/exec` and front both `script.google.com` and redirected `script.googleusercontent.com` through `domain_fronting_target` with `domain_fronting_sni`, while preserving the current Google hostname as the HTTP `Host`. `http-request-body` uses GET-only requests and carries the GhostWire request envelope in the query parameter named by `http_request_body_param`. Configure `http_request_body_param` with the same value on both client and server.
 
 With a configured IP instead of `www.google.com`:
 
