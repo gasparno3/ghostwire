@@ -505,9 +505,9 @@ class HTTPRequestClientTransport:
                 next_url=urljoin(current_url,response.headers["Location"])
                 logger.debug(f"HTTP request redirect {response.status}: {current_url} -> {next_url}")
                 current_url=next_url
-                if not self.body_mode:
+                if not self.body_mode or getattr(self.config,"gas_script_id",""):
                     params=[]
-                if not self.body_mode and (response.status==303 or (response.status in (301,302) and current_method.upper()=="POST")):
+                if (not self.body_mode or getattr(self.config,"gas_script_id","")) and (response.status==303 or (response.status in (301,302,307,308) and current_method.upper()=="POST")):
                     current_method="GET"
                     current_body=None
         return 599,{},b"too many redirects"
