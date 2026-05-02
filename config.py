@@ -165,5 +165,6 @@ class ClientConfig:
         self.domain_fronting_target=config["server"].get("domain_fronting_target","")
         self.domain_fronting_sni=config["server"].get("domain_fronting_sni","")
         self.http_request_body_param=config["server"].get("http_request_body_param","data")
+        self.http_request_body_method=config["server"].get("http_request_body_method","GET").upper()
         self.gas_script_id=config["server"].get("gas_script_id","")
         self.service_name=config["server"].get("service_name","ghostwire-client")

@@ -165,6 +165,7 @@ http_request_min_download_ms=100   # Minimum delay between poll requests
 http_request_max_upload_bytes=262144    # Max bytes sent in a single upload request
 http_request_max_download_bytes=262144  # Max bytes returned in a single poll/upload response
 http_request_body_param="data"     # Query parameter carrying http-request-body payloads
+http_request_body_method="GET"     # GET query mode or POST body mode for http-request-body
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -258,6 +259,7 @@ http_request_min_download_ms=100   # Minimum delay between poll requests
 http_request_max_upload_bytes=262144    # Max bytes sent in a single upload request
 http_request_max_download_bytes=262144  # Max bytes returned in a single poll/upload response
 http_request_body_param="data"     # Query parameter carrying http-request-body payloads
+http_request_body_method="GET"     # GET query mode or POST body mode for http-request-body
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -291,12 +293,13 @@ url="https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
 gas_script_id="YOUR_DEPLOYMENT_ID"
 allow_redirects=true
 http_request_body_param="data"
+http_request_body_method="POST"
 domain_fronting_host="script.google.com"
 domain_fronting_target="www.google.com"
 domain_fronting_sni="www.google.com"
 ```
 
-`gas_script_id` makes GhostWire start at `script.google.com/macros/s/{id}/exec` and front both `script.google.com` and redirected `script.googleusercontent.com` through `domain_fronting_target` with `domain_fronting_sni`, while preserving the current Google hostname as the HTTP `Host`. `http-request-body` uses GET-only requests and carries the GhostWire request envelope in the query parameter named by `http_request_body_param`. Configure `http_request_body_param` with the same value on both client and server.
+`gas_script_id` makes GhostWire start at `script.google.com/macros/s/{id}/exec` and front both `script.google.com` and redirected `script.googleusercontent.com` through `domain_fronting_target` with `domain_fronting_sni`, while preserving the current Google hostname as the HTTP `Host`. `http-request-body` uses `http_request_body_method`; `GET` carries the GhostWire request envelope in the query parameter named by `http_request_body_param`, while `POST` sends it in the request body. Configure the same method and parameter value on both client and server.
 
 With a configured IP instead of `www.google.com`:
 

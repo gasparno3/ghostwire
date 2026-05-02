@@ -472,9 +472,13 @@ class HTTPRequestClientTransport:
             if self.pending_ack:
                 meta["ack"]=str(self.pending_ack)
             body=pack_body_message(body,meta)
-            params.append((getattr(self.config,"http_request_body_param","data"),body.decode()))
-            body=None
-            method="GET"
+            if getattr(self.config,"http_request_body_method","GET") == "POST":
+                headers.setdefault("Content-Type","text/plain; charset=utf-8")
+                method="POST"
+            else:
+                params.append((getattr(self.config,"http_request_body_param","data"),body.decode()))
+                body=None
+                method="GET"
         else:
             params.append(("action",action))
         if self.session_id:
