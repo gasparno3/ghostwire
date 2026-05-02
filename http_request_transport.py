@@ -6,7 +6,7 @@ import os
 import ssl
 import time
 from aiohttp import ClientError,ClientSession,ClientTimeout,TCPConnector,web
-from urllib.parse import parse_qsl,urlparse,urlunparse
+from urllib.parse import parse_qsl,urljoin,urlparse,urlunparse
 from protocol import *
 from auth import validate_token
 
@@ -426,12 +426,28 @@ class HTTPRequestClientTransport:
         self.pending_ack=0
         self.received_batches=set()
         self.active_poll_users=0
+        self.last_activity_time=0.0
     def log_error_throttled(self,message):
         now=time.time()
         if message!=self.last_error_log_message or now-self.last_error_log_time>=10:
             logger.error(message)
             self.last_error_log_time=now
             self.last_error_log_message=message
+    def is_idle(self):
+        return getattr(self.config,"mode","reverse")=="direct" and time.time()-self.last_activity_time>=max(1,self.config.ping_interval)
+    def apply_domain_fronting(self,url,headers):
+        host=getattr(self.config,"domain_fronting_host","")
+        target=getattr(self.config,"domain_fronting_target","")
+        if not host or not target:
+            return url,headers,None
+        parsed=urlparse(url)
+        if parsed.hostname!=host:
+            return url,headers,None
+        port=f":{parsed.port}" if parsed.port else ""
+        new_headers=dict(headers)
+        new_headers["Host"]=host
+        modified=url.replace(f"{parsed.scheme}://{parsed.hostname}{port}",f"{parsed.scheme}://{target}{port}",1)
+        return modified,new_headers,getattr(self.config,"domain_fronting_sni","") or target
     async def request(self,method,action,body=b"",extra_headers=None,timeout_seconds=30):
         headers=dict(self.headers)
         user_agent=getattr(self.config,"user_agent","")
@@ -461,9 +477,23 @@ class HTTPRequestClientTransport:
         if self.pending_ack:
             if not self.body_mode:
                 headers[HDR_ACK]=str(self.pending_ack)
-        async with self.session.request(method,self.server_url,params=params,data=body,headers=headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds),allow_redirects=getattr(self.config,"allow_redirects",True)) as response:
-            data=await response.read()
-            return response.status,response.headers,data
+        current_url=self.server_url
+        current_method=method
+        current_body=body
+        for _ in range(10):
+            request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
+            async with self.session.request(current_method,request_url,params=params,data=current_body,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds),allow_redirects=False,server_hostname=sni_host) as response:
+                data=await response.read()
+                if not getattr(self.config,"allow_redirects",True) or response.status not in (301,302,303,307,308) or "Location" not in response.headers:
+                    return response.status,response.headers,data
+                next_url=urljoin(current_url,response.headers["Location"])
+                logger.debug(f"HTTP request redirect {response.status}: {current_url} -> {next_url}")
+                current_url=next_url
+                params=[]
+                if not self.body_mode and (response.status==303 or (response.status in (301,302) and current_method.upper()=="POST")):
+                    current_method="GET"
+                    current_body=None
+        return 599,{},b"too many redirects"
     def mark_batch_received(self,batch_seq):
         if batch_seq:
             if batch_seq in self.received_batches:
@@ -564,7 +594,10 @@ class HTTPRequestClientTransport:
                 current=len(self.poll_tasks)
                 target=current
                 qsize=self.recv_queue.qsize()
-                if self.poll_full_count>=max(1,current) or qsize>=self.config.ws_pool_scale_up:
+                if self.is_idle():
+                    target=1
+                    scale_down_count=0
+                elif self.poll_full_count>=max(1,current) or qsize>=self.config.ws_pool_scale_up:
                     target=min(self.config.http_request_poll_connections,current+1)
                     scale_down_count=0
                 elif self.poll_empty_count>=max(3,current*3) and qsize<=self.config.ws_pool_scale_down:
@@ -616,6 +649,7 @@ class HTTPRequestClientTransport:
                     await asyncio.sleep(0.1)
                     continue
                 self.last_upload_time=time.time()
+                self.last_activity_time=self.last_upload_time
                 if status not in (200,204) and not data:
                     self.log_error_throttled(f"HTTP request upload failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
@@ -637,6 +671,7 @@ class HTTPRequestClientTransport:
                     if len(data)>=self.config.http_request_max_download_bytes:
                         self.poll_full_count+=1
                     await self.recv_queue.put(data)
+                    self.last_activity_time=time.time()
                 else:
                     self.poll_empty_count+=1
         except asyncio.CancelledError:
@@ -647,7 +682,8 @@ class HTTPRequestClientTransport:
         try:
             while not self.stop_event.is_set():
                 try:
-                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(self.config.http_request_min_download_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(self.config.http_request_min_download_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                    wait_ms=self.config.ping_interval*1000 if self.is_idle() else self.config.http_request_min_download_ms
+                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(wait_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(wait_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
                     self.log_error_throttled(f"HTTP request poll disconnected, retrying: {e}")
                     await asyncio.sleep(0.1)
@@ -673,6 +709,7 @@ class HTTPRequestClientTransport:
                     if len(data)>=self.config.http_request_max_download_bytes:
                         self.poll_full_count+=1
                     await self.recv_queue.put(data)
+                    self.last_activity_time=time.time()
                 else:
                     self.poll_empty_count+=1
         except asyncio.CancelledError:

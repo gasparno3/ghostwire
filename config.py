@@ -160,4 +160,7 @@ class ClientConfig:
         self.resolve_ip=config["server"].get("resolve_ip","")
         self.sni=config["server"].get("sni","")
         self.host_header=config["server"].get("host_header","")
+        self.domain_fronting_host=config["server"].get("domain_fronting_host","")
+        self.domain_fronting_target=config["server"].get("domain_fronting_target","")
+        self.domain_fronting_sni=config["server"].get("domain_fronting_sni","")
         self.service_name=config["server"].get("service_name","ghostwire-client")
