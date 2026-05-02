@@ -21,6 +21,13 @@ HDR_WAIT="X-Request-Timeout"
 def header_get(headers,name,old_name,default=""):
     return headers.get(name,"") or headers.get(old_name,default)
 
+def pack_body_message(payload=b"",meta=None):
+    lines=[]
+    for key,value in (meta or {}).items():
+        if value:
+            lines.append(f"{key}={value}".encode())
+    return BODY_MAGIC+b"\n".join(lines)+b"\n\n"+base64.b64encode(payload)
+
 def pack_body_response(payload=b"",session_id="",batch_seq=0):
     meta=[]
     if session_id:
@@ -41,6 +48,8 @@ def unpack_body_response(data):
     return meta,base64.b64decode(payload) if payload else b""
 
 async def read_body_payload(request,body_mode):
+    if body_mode and "gw_body_payload" in request:
+        return request["gw_body_payload"]
     body=await request.read()
     return base64.b64decode(body) if body_mode and body else body
 
@@ -138,14 +147,32 @@ class HTTPRequestServerHandler:
     def make_session_id(self):
         return os.urandom(16).hex()
     def get_session_id(self,request):
-        return request.query.get("sid","") or header_get(request.headers,HDR_SESSION,"X-GhostWire-Session")
+        return request.query.get("sid","") or request.get("gw_body_meta",{}).get("sid","") or header_get(request.headers,HDR_SESSION,"X-GhostWire-Session")
     def get_session(self,request):
         session_id=self.get_session_id(request)
         if not session_id:
             return None
         return self.sessions.get(session_id)
     async def handle_request(self,request):
-        action=request.query.get("action","")
+        if self.body_mode:
+            meta,body=unpack_body_response(await request.read())
+            request["gw_body_meta"]=meta
+            request["gw_body_payload"]=body
+        action=request.query.get("action","") or request.get("gw_body_meta",{}).get("action","")
+        if self.body_mode:
+            if action=="open":
+                return await self.handle_open(request)
+            if action=="auth":
+                return await self.handle_auth(request)
+            if action=="key":
+                return await self.handle_key(request)
+            if action=="upload":
+                return await self.handle_upload(request)
+            if action=="poll":
+                return await self.handle_poll(request)
+            if action=="close":
+                return await self.handle_close(request)
+            return web.Response(status=405)
         if request.method=="POST" and action=="open":
             return await self.handle_open(request)
         if request.method=="POST" and action=="auth":
@@ -280,10 +307,11 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
-            session.ack_outbound(int(request.query.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
+            meta=request.get("gw_body_meta",{})
+            session.ack_outbound(int(request.query.get("ack","") or meta.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
             body=await read_body_payload(request,self.body_mode)
             await self.process_messages(session,body)
-            max_bytes=max(1,int(request.query.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
+            max_bytes=max(1,int(request.query.get("max","") or meta.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
             batch_seq,response_body=await session.collect_outbound(max_bytes,0)
             if response_body:
                 if self.body_mode:
@@ -301,9 +329,10 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
-            session.ack_outbound(int(request.query.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
-            max_bytes=max(1,int(request.query.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
-            wait_ms=max(0,int(request.query.get("wait","") or header_get(request.headers,HDR_WAIT,"X-GhostWire-Wait-Ms",self.server.config.http_request_min_download_ms)))
+            meta=request.get("gw_body_meta",{})
+            session.ack_outbound(int(request.query.get("ack","") or meta.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
+            max_bytes=max(1,int(request.query.get("max","") or meta.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
+            wait_ms=max(0,int(request.query.get("wait","") or meta.get("wait","") or header_get(request.headers,HDR_WAIT,"X-GhostWire-Wait-Ms",self.server.config.http_request_min_download_ms)))
             batch_seq,response_body=await session.collect_outbound(max_bytes,wait_ms)
             if response_body:
                 if self.body_mode:
@@ -408,23 +437,29 @@ class HTTPRequestClientTransport:
         user_agent=getattr(self.config,"user_agent","")
         if user_agent:
             headers.setdefault("User-Agent",user_agent)
-        params=list(self.base_params)+[("action",action)]
+        params=list(self.base_params)
         if self.body_mode:
-            body=base64.b64encode(body) if body else b""
+            meta={"action":action}
+            if self.session_id:
+                meta["sid"]=self.session_id
+            if extra_headers:
+                meta.update(extra_headers)
+            if self.pending_ack:
+                meta["ack"]=str(self.pending_ack)
+            body=pack_body_message(body,meta)
             headers.setdefault("Content-Type","text/plain; charset=utf-8")
+            method="POST"
+        else:
+            params.append(("action",action))
         if self.session_id:
-            params.append(("sid",self.session_id))
             if not self.body_mode:
+                params.append(("sid",self.session_id))
                 headers[HDR_SESSION]=self.session_id
         if extra_headers:
-            if self.body_mode:
-                params.extend(extra_headers.items())
-            else:
+            if not self.body_mode:
                 headers.update(extra_headers)
         if self.pending_ack:
-            if self.body_mode:
-                params.append(("ack",str(self.pending_ack)))
-            else:
+            if not self.body_mode:
                 headers[HDR_ACK]=str(self.pending_ack)
         async with self.session.request(method,self.server_url,params=params,data=body,headers=headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds),allow_redirects=getattr(self.config,"allow_redirects",True)) as response:
             data=await response.read()
