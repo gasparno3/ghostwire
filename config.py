@@ -90,6 +90,7 @@ class ServerConfig:
         self.http_request_max_download_bytes=config["server"].get("http_request_max_download_bytes",1048576)
         self.http_request_poll_min_connections=config["server"].get("http_request_poll_min_connections",1)
         self.http_request_poll_connections=config["server"].get("http_request_poll_connections",4)
+        self.http_request_body_param=config["server"].get("http_request_body_param","data")
         self.udp_enabled=config["server"].get("udp_enabled",True)
         self.auto_update=config["server"].get("auto_update",True)
         self.update_check_interval=config["server"].get("update_check_interval",300)
@@ -163,4 +164,5 @@ class ClientConfig:
         self.domain_fronting_host=config["server"].get("domain_fronting_host","")
         self.domain_fronting_target=config["server"].get("domain_fronting_target","")
         self.domain_fronting_sni=config["server"].get("domain_fronting_sni","")
+        self.http_request_body_param=config["server"].get("http_request_body_param","data")
         self.service_name=config["server"].get("service_name","ghostwire-client")

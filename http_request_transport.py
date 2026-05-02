@@ -144,6 +144,7 @@ class HTTPRequestServerHandler:
         self.pending_sessions={}
         self.sessions={}
         self.shutdown_event=server_instance.shutdown_event
+        self.body_param=getattr(server_instance.config,"http_request_body_param","data")
     def make_session_id(self):
         return os.urandom(16).hex()
     def get_session_id(self,request):
@@ -155,7 +156,10 @@ class HTTPRequestServerHandler:
         return self.sessions.get(session_id)
     async def handle_request(self,request):
         if self.body_mode:
-            meta,body=unpack_body_response(await request.read())
+            raw_body=request.query.get(self.body_param,"").encode()
+            if not raw_body:
+                raw_body=await request.read()
+            meta,body=unpack_body_response(raw_body)
             request["gw_body_meta"]=meta
             request["gw_body_payload"]=body
         action=request.query.get("action","") or request.get("gw_body_meta",{}).get("action","")
@@ -463,8 +467,9 @@ class HTTPRequestClientTransport:
             if self.pending_ack:
                 meta["ack"]=str(self.pending_ack)
             body=pack_body_message(body,meta)
-            headers.setdefault("Content-Type","text/plain; charset=utf-8")
-            method="POST"
+            params.append((getattr(self.config,"http_request_body_param","data"),body.decode()))
+            body=None
+            method="GET"
         else:
             params.append(("action",action))
         if self.session_id:
@@ -489,7 +494,8 @@ class HTTPRequestClientTransport:
                 next_url=urljoin(current_url,response.headers["Location"])
                 logger.debug(f"HTTP request redirect {response.status}: {current_url} -> {next_url}")
                 current_url=next_url
-                params=[]
+                if not self.body_mode:
+                    params=[]
                 if not self.body_mode and (response.status==303 or (response.status in (301,302) and current_method.upper()=="POST")):
                     current_method="GET"
                     current_body=None

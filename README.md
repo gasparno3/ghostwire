@@ -160,10 +160,11 @@ ws_pool_min=2              # Min always-connected channels (default: 2)
 ws_pool_stripe=false       # Stripe packets across channels (unstable, default: false)
 udp_enabled=true           # Also listen for UDP on tunnel ports (default: true)
 ws_send_batch_bytes=65536  # Max bytes per WebSocket frame (default: 65536)
-http_request_min_upload_ms=50      # Minimum delay between upload POSTs
+http_request_min_upload_ms=50      # Minimum delay between upload requests
 http_request_min_download_ms=100   # Minimum delay between poll requests
-http_request_max_upload_bytes=262144    # Max bytes sent in a single upload POST
+http_request_max_upload_bytes=262144    # Max bytes sent in a single upload request
 http_request_max_download_bytes=262144  # Max bytes returned in a single poll/upload response
+http_request_body_param="data"     # Query parameter carrying http-request-body payloads
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -214,10 +215,10 @@ For web browsing with hundreds of concurrent connections (typical modern website
   - **65536 (64KB)**: Default, best balance for most use cases
   - **262144 (256KB)**: Higher throughput, some latency increase under load
   - **16384 (16KB)**: Lowest latency, slightly lower throughput
-- **`http_request_min_upload_ms`** and **`http_request_min_download_ms`** (both, defaults: `50` and `100`): Minimum spacing between upload POSTs and download polls for `protocol="http-request"`
+- **`http_request_min_upload_ms`** and **`http_request_min_download_ms`** (both, defaults: `50` and `100`): Minimum spacing between upload requests and download polls for `protocol="http-request"`
   - Increase them to reduce request count and blend in with non-streaming HTTP transports
   - Decrease them to improve latency at the cost of more HTTP requests
-- **`http_request_max_upload_bytes`** and **`http_request_max_download_bytes`** (both, default: `262144`): Per-request caps for upload POST bodies and poll/upload responses in `protocol="http-request"`
+- **`http_request_max_upload_bytes`** and **`http_request_max_download_bytes`** (both, default: `262144`): Per-request caps for upload payloads and poll/upload responses in `protocol="http-request"`
   - `262144` bytes is `256KB` (`0.25 MB`)
   - `524288` bytes is `512KB` (`0.5 MB`)
   - Larger values improve throughput, smaller values reduce per-request burst size
@@ -251,10 +252,11 @@ domain_fronting_target=""  # connect hostname/IP, e.g. www.google.com or a confi
 domain_fronting_sni=""     # TLS SNI used for domain fronting target
 service_name="ghostwire-client"  # systemd service name for auto-restart after update
 ws_send_batch_bytes=65536  # Max bytes per WebSocket frame (default: 65536)
-http_request_min_upload_ms=50      # Minimum delay between upload POSTs
+http_request_min_upload_ms=50      # Minimum delay between upload requests
 http_request_min_download_ms=100   # Minimum delay between poll requests
-http_request_max_upload_bytes=262144    # Max bytes sent in a single upload POST
+http_request_max_upload_bytes=262144    # Max bytes sent in a single upload request
 http_request_max_download_bytes=262144  # Max bytes returned in a single poll/upload response
+http_request_body_param="data"     # Query parameter carrying http-request-body payloads
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
@@ -286,10 +288,13 @@ Google Apps Script domain-fronting example for `http-request-body`:
 protocol="http-request-body"
 url="https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
 allow_redirects=true
+http_request_body_param="data"
 domain_fronting_host="script.googleusercontent.com"
 domain_fronting_target="www.google.com"
 domain_fronting_sni="www.google.com"
 ```
+
+`http-request-body` uses GET-only requests and carries the GhostWire request envelope in the query parameter named by `http_request_body_param` for Google Apps Script compatibility. Configure the same value on both client and server.
 
 With a configured IP instead of `www.google.com`:
 
@@ -386,7 +391,7 @@ location /tunnel {
 **Best for:** HTTP-only environments where streaming is unreliable or blocked, while still using GhostWire's encrypted/authenticated tunnel messages
 
 - ✅ Uses regular HTTP requests instead of a long-lived stream
-- ✅ Uploads data with `POST` and downloads with polling
+- ✅ Uploads data with per-request HTTP calls and downloads with polling
 - ✅ Upload responses can also carry download data to reduce extra requests
 - ✅ Works with simple HTTP reverse proxies that do not support WebSocket/gRPC streaming well
 - ❌ Higher request overhead than WebSocket/gRPC/HTTP2 streaming
@@ -405,7 +410,8 @@ http_request_max_download_bytes=524288
 ```
 
 **How it works:**
-- Client uploads encrypted GhostWire packets with HTTP `POST`
+- Client uploads encrypted GhostWire packets with HTTP requests
+- `http-request-body` uses GET-only requests with the body envelope in query parameters for Google Apps Script compatibility
 - Client downloads queued packets with HTTP polling
 - The server may return queued download data directly in an upload response
 - The min upload/download settings limit request frequency
