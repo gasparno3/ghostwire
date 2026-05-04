@@ -151,11 +151,11 @@ ports=[
 
 ```toml
 [server]
-protocol="websocket"        # "websocket" (پیش‌فرض)، "http-request"، "http2" یا "grpc"
+protocol="websocket"        # "websocket" (پیش‌فرض)، "http-request"، "http-request-sse"، "http2" یا "grpc"
 listen_host="0.0.0.0"
 listen_port=8443
 listen_backlog=4096         # عمق صف گوش دادن TCP
-websocket_path="/ws"        # برای پروتکل‌های websocket و http-request استفاده می‌شود
+websocket_path="/ws"        # برای پروتکل‌های websocket و HTTP request استفاده می‌شود
 ping_interval=30            # فاصله پینگ سطح برنامه (ثانیه)
 ping_timeout=60             # تایم‌اوت اتصال (ثانیه)
 ws_pool_enabled=true        # فعال کردن استخر کانال فرزند (پیش‌فرض: true)
@@ -207,8 +207,8 @@ file="/var/log/ghostwire-server.log"
 
 ```toml
 [server]
-protocol="websocket"        # "websocket" (پیش‌فرض)، "http-request"، "http2" یا "grpc"
-url="wss://tunnel.example.com/ws"  # از ws(s):// برای websocket و از http(s):// برای http-request/http2/grpc استفاده کنید
+protocol="websocket"        # "websocket" (پیش‌فرض)، "http-request"، "http-request-sse"، "http2" یا "grpc"
+url="wss://tunnel.example.com/ws"  # از ws(s):// برای websocket و از http(s):// برای HTTP request/http2/grpc استفاده کنید
 token="V1StGXR8_Z5jdHi6B-my"
 ping_interval=30            # فاصله پینگ سطح برنامه (ثانیه)
 ping_timeout=60             # تایم‌اوت اتصال (ثانیه)
@@ -288,11 +288,11 @@ update_https_proxy="http://127.0.0.1:8080"
   - **262144 (256KB)**: توان عملیاتی بالاتر، افزایش تأخیر زیر بار
   - **16384 (16KB)**: کمترین تأخیر، کمی کاهش توان عملیاتی
 
-- **`http_request_min_upload_ms`** و **`http_request_min_download_ms`** (هر دو، پیش‌فرض: `50` و `100`): حداقل فاصله بین درخواست‌های آپلود و polling برای `protocol="http-request"`
+- **`http_request_min_upload_ms`** و **`http_request_min_download_ms`** (هر دو، پیش‌فرض: `50` و `100`): حداقل فاصله بین درخواست‌های آپلود و polling/SSE برای `protocol="http-request"` و `protocol="http-request-sse"`
   - برای کاهش تعداد درخواست‌ها و شبیه‌تر شدن به ترافیک HTTP غیر استریم این مقادیر را افزایش دهید
   - برای کاهش تأخیر با هزینه افزایش تعداد درخواست‌ها این مقادیر را کاهش دهید
 
-- **`http_request_max_upload_bytes`** و **`http_request_max_download_bytes`** (هر دو، پیش‌فرض: `262144`): سقف حجم هر درخواست آپلود و هر پاسخ polling/upload در `protocol="http-request"`
+- **`http_request_max_upload_bytes`** و **`http_request_max_download_bytes`** (هر دو، پیش‌فرض: `262144`): سقف حجم هر درخواست آپلود و هر پاسخ polling/upload/SSE در ترابری‌های HTTP request
   - `262144` بایت برابر `256KB` (`0.25 MB`) است
   - `524288` بایت برابر `512KB` (`0.5 MB`) است
   - مقادیر بزرگ‌تر توان عملیاتی را بیشتر می‌کنند و مقادیر کوچک‌تر اندازه burst هر درخواست را کمتر می‌کنند
@@ -305,7 +305,7 @@ update_https_proxy="http://127.0.0.1:8080"
 
 ## گزینه‌های پروتکل
 
-گوست‌وایر از چهار پروتکل انتقال پشتیبانی می‌کند، هر کدام با معاملات متفاوت:
+گوست‌وایر از چند پروتکل انتقال پشتیبانی می‌کند، هر کدام با معاملات متفاوت:
 
 ### پروتکل WebSocket (protocol="websocket") - پیش‌فرض
 
@@ -405,6 +405,34 @@ location /ws {
 
 **سازگاری با CloudFlare:** پروتکل HTTP per-request از درخواست‌های استاندارد HTTP POST/GET استفاده می‌کند، بنابراین CloudFlare آن را به‌صورت پیش‌فرض پروکسی می‌کند و نیازی به تنظیمات ویژه در داشبورد (مثل WebSockets یا gRPC) ندارد. فقط SSL/TLS را روی **Full (Strict)** تنظیم کنید. برای کاهش نرخ درخواست از طریق CloudFlare، `http_request_min_upload_ms` و `http_request_min_download_ms` را روی ۲۰۰–۵۰۰ms تنظیم کنید.
 
+### پروتکل HTTP Request SSE (protocol="http-request-sse") - سبک Packet-Up
+
+بهترین برای: CDNهای ناپایدار که polling دانلود در آن‌ها ضعیف است ولی استریم یک‌طرفه HTTP قابل اتکاتر است
+
+- ✅ دانلود از طریق Server-Sent Events یا SSE انجام می‌شود
+- ✅ آپلود با درخواست‌های کوتاه و کوچک `POST` انجام می‌شود
+- ✅ از همان پیام‌های رمزگذاری‌شده GhostWire در `http-request` استفاده می‌کند
+- ✅ `http_request_max_upload_bytes` و `http_request_min_upload_ms` اندازه burst و نرخ درخواست آپلود را کنترل می‌کنند
+- ❌ نیاز دارد proxy/CDN پاسخ‌های بلندمدت `text/event-stream` را اجازه دهد
+- ❌ استخر کانال‌های WebSocket برای این پروتکل اعمال نمی‌شود
+
+**تنظیمات:**
+```toml
+[server]
+protocol="http-request-sse"
+url="https://tunnel.example.com/ws"
+http_request_min_upload_ms=50
+http_request_min_download_ms=50
+http_request_max_upload_bytes=65536
+http_request_max_download_bytes=131072
+```
+
+**نحوه کار:**
+- کلاینت پکت‌های رمزگذاری‌شده را با درخواست‌های کوتاه POST آپلود می‌کند
+- سرور پکت‌های دانلود را روی یک پاسخ SSE استریم می‌کند
+- کلاینت batchهای استریم‌شده را با POSTهای کوچک ack می‌کند
+- محدودیت آپلود کوچک‌تر و فاصله آپلود بیشتر می‌تواند buffering و burst درخواست در CDN را کمتر کند
+
 ### پروتکل gRPC (protocol="grpc") - بهینه‌سازی شده برای CloudFlare
 
 بهترین برای: CloudFlare با gRPC فعال، سناریوهای عملکرد بالا
@@ -441,6 +469,7 @@ location /tunnel {
 **راهنمای انتخاب پروتکل:**
 - **از WebSocket استفاده کنید** اگر: از طریق CloudFlare اجرا می‌کنید (رایج‌ترین حالت)، حداکثر سازگاری نیاز دارید
 - **از HTTP per-request استفاده کنید** اگر: به ترابری HTTP غیر استریم نیاز دارید ولی همچنان امنیت و تونل GhostWire را می‌خواهید
+- **از HTTP request SSE استفاده کنید** اگر: CDN ناپایدار شما SSE یک‌طرفه را بهتر از polling دانلود یا WebSocket عبور می‌دهد
 - **از gRPC استفاده کنید** اگر: از طریق CloudFlare با gRPC فعال اجرا می‌کنید، بهترین عملکرد می‌خواهید
 - **از HTTP/2 استفاده کنید** اگر: اتصال مستقیم بدون CloudFlare، راه‌اندازی پروکسی سفارشی
 
@@ -475,7 +504,7 @@ location /tunnel {
 }
 ```
 
-**برای پروتکل HTTP per-request:**
+**برای پروتکل HTTP per-request و HTTP request SSE:**
 ```nginx
 location /ws {
     proxy_pass http://127.0.0.1:8443;
@@ -563,6 +592,7 @@ tcp_nodelay on;
 | WebSocket | ✅ بله (با تنظیمات) | نیاز به Network → WebSockets ON |
 | gRPC | ✅ بله (با تنظیمات) | نیاز به Network → gRPC ON |
 | HTTP per-request | ✅ بله (پیش‌فرض) | HTTP معمولی — نیاز به تنظیمات ویژه CF ندارد |
+| HTTP request SSE | ✅ بله (پیش‌فرض) | دانلود SSE و آپلود POST کوتاه |
 | HTTP/2 | ❌ خیر | سازگار نیست - از اتصال مستقیم استفاده کنید |
 
 **تنظیمات ضروری داشبورد CloudFlare**

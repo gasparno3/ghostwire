@@ -1083,7 +1083,7 @@ class GhostWireServer:
         if self.config.protocol=="http2":
             from http2_transport import start_http2_server
             await start_http2_server(self)
-        elif self.config.protocol in ("http-request", "http-request-body"):
+        elif self.config.protocol in ("http-request", "http-request-body", "http-request-sse"):
             from http_request_transport import start_http_request_server
             await start_http_request_server(self)
         elif self.config.protocol=="grpc":

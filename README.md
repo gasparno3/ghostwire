@@ -144,12 +144,12 @@ ports=[
 
 ```toml
 [server]
-protocol="websocket"       # "websocket" (default), "http-request", "http2", or "grpc"
+protocol="websocket"       # "websocket" (default), "http-request", "http-request-sse", "http2", or "grpc"
 listen_host="0.0.0.0"
 listen_port=8443
 mode="reverse"             # "reverse" (default) or "direct"
 listen_backlog=4096        # TCP listen queue depth
-websocket_path="/ws"       # Used by websocket and http-request protocols
+websocket_path="/ws"       # Used by websocket and HTTP request protocols
 ping_interval=30           # Application-level ping interval (seconds)
 ping_timeout=60            # Connection timeout (seconds)
 http_proxy=""              # optional: proxy for outbound CONNECT tunnel traffic
@@ -216,10 +216,10 @@ For web browsing with hundreds of concurrent connections (typical modern website
   - **65536 (64KB)**: Default, best balance for most use cases
   - **262144 (256KB)**: Higher throughput, some latency increase under load
   - **16384 (16KB)**: Lowest latency, slightly lower throughput
-- **`http_request_min_upload_ms`** and **`http_request_min_download_ms`** (both, defaults: `50` and `100`): Minimum spacing between upload requests and download polls for `protocol="http-request"`
+- **`http_request_min_upload_ms`** and **`http_request_min_download_ms`** (both, defaults: `50` and `100`): Minimum spacing between upload requests and download polls/SSE sends for `protocol="http-request"` and `protocol="http-request-sse"`
   - Increase them to reduce request count and blend in with non-streaming HTTP transports
   - Decrease them to improve latency at the cost of more HTTP requests
-- **`http_request_max_upload_bytes`** and **`http_request_max_download_bytes`** (both, default: `262144`): Per-request caps for upload payloads and poll/upload responses in `protocol="http-request"`
+- **`http_request_max_upload_bytes`** and **`http_request_max_download_bytes`** (both, default: `262144`): Per-request caps for upload payloads and poll/upload/SSE response payloads in HTTP request transports
   - `262144` bytes is `256KB` (`0.25 MB`)
   - `524288` bytes is `512KB` (`0.5 MB`)
   - Larger values improve throughput, smaller values reduce per-request burst size
@@ -236,8 +236,8 @@ For web browsing with hundreds of concurrent connections (typical modern website
 
 ```toml
 [server]
-protocol="websocket"       # "websocket" (default), "http-request", "http2", or "grpc"
-url="wss://tunnel.example.com/ws"  # Use ws(s):// for websocket, http(s):// for http-request/http2/grpc
+protocol="websocket"       # "websocket" (default), "http-request", "http-request-sse", "http2", or "grpc"
+url="wss://tunnel.example.com/ws"  # Use ws(s):// for websocket, http(s):// for HTTP request/http2/grpc
 token="V1StGXR8_Z5jdHi6B-my"
 mode="reverse"             # must match server mode
 ping_interval=30           # Application-level ping interval (seconds)
@@ -438,6 +438,34 @@ location /ws {
 
 **CloudFlare compatibility:** HTTP per-request uses standard HTTP POST/GET requests, so CloudFlare proxies it by default with no special dashboard toggles required. Set SSL/TLS to **Full (Strict)**. Increase `http_request_min_upload_ms` / `http_request_min_download_ms` to 200–500ms if you want requests to blend in with normal HTTP traffic through CloudFlare.
 
+### HTTP Request SSE Protocol (`protocol="http-request-sse"`) - Packet-Up Style HTTP
+
+**Best for:** Unstable CDNs where repeated download polling performs poorly but a one-way HTTP stream is reliable
+
+- ✅ Downloads over Server-Sent Events (SSE)
+- ✅ Uploads use small, short-lived POST requests
+- ✅ Uses the same encrypted GhostWire packet format as `http-request`
+- ✅ `http_request_max_upload_bytes` and `http_request_min_upload_ms` control upload burst size and request rate
+- ❌ Requires proxies/CDNs to allow long-lived `text/event-stream` responses
+- ❌ WebSocket pool/child-channel scaling does not apply
+
+**Configuration:**
+```toml
+[server]
+protocol="http-request-sse"
+url="https://tunnel.example.com/ws"
+http_request_min_upload_ms=50
+http_request_min_download_ms=50
+http_request_max_upload_bytes=65536
+http_request_max_download_bytes=131072
+```
+
+**How it works:**
+- Client uploads encrypted packets using short POST requests
+- Server streams download packets over one SSE response
+- Client acknowledges streamed batches with small POST acknowledgements
+- Smaller upload limits and higher upload intervals can reduce CDN buffering and request bursts
+
 ### gRPC Protocol (`protocol="grpc"`) - CloudFlare Optimized
 
 **Best for:** CloudFlare with gRPC enabled, high-performance scenarios
@@ -469,6 +497,7 @@ location /tunnel {
 **Protocol Selection Guide:**
 - **Use WebSocket** if: Running through CloudFlare (most common), need maximum compatibility
 - **Use HTTP per-request** if: You need non-streaming HTTP transport but still want GhostWire security and tunneling
+- **Use HTTP request SSE** if: An unstable CDN handles one-way SSE better than download polling or WebSocket
 - **Use gRPC** if: Running through CloudFlare with gRPC enabled, want best performance
 - **Use HTTP/2** if: Direct connection without CloudFlare, custom proxy setup
 
@@ -503,7 +532,7 @@ location /tunnel {
 }
 ```
 
-**For HTTP per-request protocol:**
+**For HTTP per-request and HTTP request SSE protocols:**
 ```nginx
 location /ws {
     proxy_pass http://127.0.0.1:8443;
@@ -591,6 +620,7 @@ Without these timeouts, NPM will drop the persistent connection after ~60 second
 | WebSocket | ✅ Yes (with config) | Requires Network → WebSockets ON |
 | gRPC | ✅ Yes (with config) | Requires Network → gRPC ON |
 | HTTP per-request | ✅ Yes (default) | Standard HTTP — no special CF settings needed |
+| HTTP request SSE | ✅ Yes (default) | Uses SSE download plus short POST uploads |
 | HTTP/2 | ❌ No | Not compatible - use direct connection |
 
 **CRITICAL: Required CloudFlare Dashboard Settings**

@@ -138,6 +138,7 @@ class HTTPRequestServerHandler:
     def __init__(self,server_instance):
         self.server=server_instance
         self.body_mode=server_instance.config.protocol=="http-request-body"
+        self.sse_mode=server_instance.config.protocol=="http-request-sse"
         self.private_key=server_instance.private_key
         self.public_key=server_instance.public_key
         self.token=server_instance.config.token
@@ -185,8 +186,12 @@ class HTTPRequestServerHandler:
             return await self.handle_key(request)
         if request.method=="POST" and action=="upload":
             return await self.handle_upload(request)
+        if request.method=="POST" and action=="ack" and self.sse_mode:
+            return await self.handle_ack(request)
         if request.method=="GET" and action=="poll":
             return await self.handle_poll(request)
+        if request.method=="GET" and action=="sse" and self.sse_mode:
+            return await self.handle_sse(request)
         if request.method=="POST" and action=="close":
             return await self.handle_close(request)
         return web.Response(status=405)
@@ -315,6 +320,8 @@ class HTTPRequestServerHandler:
             session.ack_outbound(int(request.query.get("ack","") or meta.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
             body=await read_body_payload(request,self.body_mode)
             await self.process_messages(session,body)
+            if self.sse_mode:
+                return web.Response(status=204)
             max_bytes=max(1,int(request.query.get("max","") or meta.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
             batch_seq,response_body=await session.collect_outbound(max_bytes,0)
             if response_body:
@@ -349,6 +356,34 @@ class HTTPRequestServerHandler:
             logger.error(f"HTTP request poll error: {e}",exc_info=True)
             await self.close_session(session.session_id)
             return web.Response(status=500)
+    async def handle_ack(self,request):
+        session=self.get_session(request)
+        if not session or session.closed:
+            return web.Response(status=404)
+        meta=request.get("gw_body_meta",{})
+        session.ack_outbound(int(request.query.get("ack","") or meta.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
+        session.touch()
+        return web.Response(status=204)
+    async def handle_sse(self,request):
+        session=self.get_session(request)
+        if not session or session.closed:
+            return web.Response(status=404)
+        response=web.StreamResponse(status=200,headers={"Content-Type":"text/event-stream","Cache-Control":"no-cache","Connection":"keep-alive"})
+        await response.prepare(request)
+        try:
+            while not session.closed and not self.shutdown_event.is_set():
+                batch_seq,response_body=await session.collect_outbound(self.server.config.http_request_max_download_bytes,self.server.config.http_request_min_download_ms)
+                if response_body:
+                    payload=base64.b64encode(f"{batch_seq}:".encode()+response_body)
+                    await response.write(b"data: "+payload+b"\n\n")
+                else:
+                    await response.write(b": keepalive\n\n")
+                await response.drain()
+        except (asyncio.CancelledError,ConnectionError):
+            pass
+        except Exception as e:
+            logger.debug(f"HTTP request SSE disconnected: {e}")
+        return response
     async def handle_close(self,request):
         session=self.get_session(request)
         if session:
@@ -408,6 +443,7 @@ class HTTPRequestClientTransport:
         self.server_url=urlunparse((parsed.scheme,parsed.netloc,parsed.path,parsed.params,"",parsed.fragment))
         self.base_params=parse_qsl(parsed.query,keep_blank_values=True)
         self.body_mode=config.protocol=="http-request-body"
+        self.sse_mode=config.protocol=="http-request-sse"
         self.token=token
         self.config=config
         self.headers=headers or {}
@@ -424,6 +460,7 @@ class HTTPRequestClientTransport:
         self.upload_task=None
         self.poll_tasks=[]
         self.poll_scale_task=None
+        self.sse_task=None
         self.poll_full_count=0
         self.poll_empty_count=0
         self.last_upload_time=0.0
@@ -557,7 +594,9 @@ class HTTPRequestClientTransport:
             self.key=unpack_session_key(session_payload,client_private_key)
             self.connected=True
             self.upload_task=asyncio.create_task(self.upload_loop())
-            if getattr(self.config,"mode","reverse")!="direct":
+            if self.sse_mode:
+                self.sse_task=asyncio.create_task(self.sse_loop())
+            elif getattr(self.config,"mode","reverse")!="direct":
                 self.start_polling()
             logger.info("HTTP request transport connected and authenticated")
             return True
@@ -597,11 +636,11 @@ class HTTPRequestClientTransport:
         self.poll_scale_task=None
     def add_poll_user(self):
         self.active_poll_users+=1
-        if getattr(self.config,"mode","reverse")=="direct" and self.connected:
+        if getattr(self.config,"mode","reverse")=="direct" and self.connected and not self.sse_mode:
             self.start_polling()
     def remove_poll_user(self):
         self.active_poll_users=max(0,self.active_poll_users-1)
-        if getattr(self.config,"mode","reverse")=="direct" and self.active_poll_users==0:
+        if getattr(self.config,"mode","reverse")=="direct" and self.active_poll_users==0 and not self.sse_mode:
             self.stop_polling()
     async def poll_scale_loop(self):
         scale_down_count=0
@@ -734,6 +773,52 @@ class HTTPRequestClientTransport:
             pass
         except Exception as e:
             await self.fail_transport(e)
+    async def sse_loop(self):
+        try:
+            params=list(self.base_params)
+            params.append(("action","sse"))
+            if self.session_id:
+                params.append(("sid",self.session_id))
+            headers=dict(self.headers)
+            user_agent=getattr(self.config,"user_agent","")
+            if user_agent:
+                headers.setdefault("User-Agent",user_agent)
+            headers[HDR_SESSION]=self.session_id
+            current_url=self.server_url
+            for _ in range(10):
+                request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
+                async with self.session.get(request_url,params=params,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=None),allow_redirects=False,server_hostname=sni_host) as response:
+                    if response.status in (301,302,303,307,308) and getattr(self.config,"allow_redirects",True) and "Location" in response.headers:
+                        current_url=urljoin(current_url,response.headers["Location"])
+                        params=[]
+                        continue
+                    if response.status!=200:
+                        raise ConnectionError(f"SSE failed with HTTP {response.status}")
+                    while not response.content.at_eof():
+                        raw_line=await response.content.readline()
+                        if not raw_line:
+                            break
+                        if self.stop_event.is_set():
+                            return
+                        line=raw_line.strip()
+                        if not line or line.startswith(b":"):
+                            continue
+                        if not line.startswith(b"data:"):
+                            continue
+                        payload=base64.b64decode(line[5:].strip())
+                        seq_raw,_,data=payload.partition(b":")
+                        batch_seq=int(seq_raw or b"0")
+                        if not self.mark_batch_received(batch_seq):
+                            continue
+                        await self.request("POST","ack",extra_headers={HDR_ACK:str(batch_seq)},timeout_seconds=10)
+                        await self.recv_queue.put(data)
+                        self.last_activity_time=time.time()
+                    raise ConnectionError("SSE stream closed")
+            raise ConnectionError("SSE too many redirects")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            await self.fail_transport(e)
     async def send(self,msg):
         await self.send_queue.put(msg)
     async def recv(self):
@@ -754,7 +839,7 @@ class HTTPRequestClientTransport:
             self.recv_queue.put_nowait(None)
         except Exception:
             pass
-        for task in [self.upload_task,self.poll_scale_task]+self.poll_tasks:
+        for task in [self.upload_task,self.poll_scale_task,self.sse_task]+self.poll_tasks:
             if task and not task.done():
                 task.cancel()
         if self.session:
