@@ -749,6 +749,7 @@ class HTTPRequestClientTransport:
                     self.log_error_throttled(f"HTTP request poll failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
                     continue
+                self.last_activity_time=time.time()
                 if data:
                     meta={}
                     if self.body_mode:

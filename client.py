@@ -1129,6 +1129,8 @@ class GhostWireClient:
             await asyncio.sleep(15)
             now=time.time()
             last_activity=max(self.last_rx_time,self.last_pong_time)
+            if self.config.protocol in ("http-request", "http-request-body", "http-request-sse") and self.http_request_transport:
+                last_activity=max(last_activity,self.http_request_transport.last_activity_time)
             if now-last_activity>self.ping_timeout:
                 logger.warning("Server ping timeout, closing connection")
                 if self.config.protocol=="http2" and self.http2_transport:
