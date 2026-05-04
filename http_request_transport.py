@@ -750,6 +750,10 @@ class HTTPRequestClientTransport:
             await self.send_queue.put(None)
         except Exception:
             pass
+        try:
+            self.recv_queue.put_nowait(None)
+        except Exception:
+            pass
         for task in [self.upload_task,self.poll_scale_task]+self.poll_tasks:
             if task and not task.done():
                 task.cancel()
