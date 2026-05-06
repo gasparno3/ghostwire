@@ -340,6 +340,7 @@ class HTTPRequestServerHandler:
         if not session or session.closed:
             return web.Response(status=404)
         try:
+            session.touch()
             meta=request.get("gw_body_meta",{})
             session.ack_outbound(int(request.query.get("ack","") or meta.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
             max_bytes=max(1,int(request.query.get("max","") or meta.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
@@ -372,6 +373,7 @@ class HTTPRequestServerHandler:
         await response.prepare(request)
         try:
             while not session.closed and not self.shutdown_event.is_set():
+                session.touch()
                 batch_seq,response_body=await session.collect_outbound(self.server.config.http_request_max_download_bytes,self.server.config.http_request_min_download_ms)
                 if response_body:
                     payload=base64.b64encode(f"{batch_seq}:".encode()+response_body)
@@ -379,6 +381,7 @@ class HTTPRequestServerHandler:
                 else:
                     await response.write(b": keepalive\n\n")
                 await response.drain()
+                await asyncio.sleep(max(1,self.server.config.http_request_min_download_ms)/1000.0)
         except (asyncio.CancelledError,ConnectionError):
             pass
         except Exception as e:
@@ -509,7 +512,7 @@ class HTTPRequestClientTransport:
             if self.pending_ack:
                 meta["ack"]=str(self.pending_ack)
             body=pack_body_message(body,meta)
-            if getattr(self.config,"http_request_body_method","GET") == "POST":
+            if getattr(self.config,"http_request_body_method","GET") == "POST" or len(body)>7000:
                 headers.setdefault("Content-Type","text/plain; charset=utf-8")
                 method="POST"
             else:
@@ -705,6 +708,9 @@ class HTTPRequestClientTransport:
                     self.log_error_throttled(f"HTTP request upload disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
                     continue
+                if status==404:
+                    await self.fail_transport(ConnectionError("HTTP request session not found"))
+                    break
                 self.last_upload_time=time.time()
                 self.last_activity_time=self.last_upload_time
                 if status not in (200,204) and not data:
@@ -745,6 +751,9 @@ class HTTPRequestClientTransport:
                     self.log_error_throttled(f"HTTP request poll disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
                     continue
+                if status==404:
+                    await self.fail_transport(ConnectionError("HTTP request session not found"))
+                    break
                 if status not in (200,204) and not data:
                     self.log_error_throttled(f"HTTP request poll failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
