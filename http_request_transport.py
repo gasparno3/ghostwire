@@ -17,6 +17,7 @@ HDR_BATCH="X-Response-Id"
 HDR_ACK="X-Client-Request-Id"
 HDR_MAX="X-Max-Content-Length"
 HDR_WAIT="X-Request-Timeout"
+HDR_UPLOAD="X-Upload-Id"
 
 def header_get(headers,name,old_name,default=""):
     return headers.get(name,"") or headers.get(old_name,default)
@@ -64,6 +65,7 @@ class HTTPRequestServerSession:
         self.backlog=[]
         self.outbound_seq=0
         self.outbound_pending={}
+        self.upload_seen=set()
         self.key=None
         self.closed=False
         self.close_code=None
@@ -318,8 +320,15 @@ class HTTPRequestServerHandler:
         try:
             meta=request.get("gw_body_meta",{})
             session.ack_outbound(int(request.query.get("ack","") or meta.get("ack","") or header_get(request.headers,HDR_ACK,"X-GhostWire-Ack","0") or 0))
+            upload_seq=int(request.query.get("upload","") or meta.get("upload","") or header_get(request.headers,HDR_UPLOAD,"X-GhostWire-Upload","0") or 0)
             body=await read_body_payload(request,self.body_mode)
-            await self.process_messages(session,body)
+            if not upload_seq or upload_seq not in session.upload_seen:
+                if upload_seq:
+                    session.upload_seen.add(upload_seq)
+                    if len(session.upload_seen)>4096:
+                        session.upload_seen.clear()
+                        session.upload_seen.add(upload_seq)
+                await self.process_messages(session,body)
             if self.sse_mode:
                 return web.Response(status=204)
             max_bytes=max(1,int(request.query.get("max","") or meta.get("max","") or header_get(request.headers,HDR_MAX,"X-GhostWire-Max-Download-Bytes",self.server.config.http_request_max_download_bytes)))
@@ -470,6 +479,7 @@ class HTTPRequestClientTransport:
         self.last_error_log_time=0.0
         self.last_error_log_message=""
         self.pending_ack=0
+        self.upload_seq=0
         self.received_batches=set()
         self.active_poll_users=0
         self.last_activity_time=0.0
@@ -483,6 +493,8 @@ class HTTPRequestClientTransport:
         return str(e) or e.__class__.__name__
     def is_idle(self):
         return getattr(self.config,"mode","reverse")=="direct" and time.time()-self.last_activity_time>=max(1,self.config.ping_interval)
+    def stall_timeout(self):
+        return max(5,min(30,self.config.ping_timeout/2))
     def apply_domain_fronting(self,url,headers):
         host=getattr(self.config,"domain_fronting_host","")
         target=getattr(self.config,"domain_fronting_target","")
@@ -599,6 +611,7 @@ class HTTPRequestClientTransport:
             self.upload_task=asyncio.create_task(self.upload_loop())
             if self.sse_mode:
                 self.sse_task=asyncio.create_task(self.sse_loop())
+                self.start_polling()
             elif getattr(self.config,"mode","reverse")!="direct":
                 self.start_polling()
             logger.info("HTTP request transport connected and authenticated")
@@ -685,6 +698,9 @@ class HTTPRequestClientTransport:
                     msg=await self.send_queue.get()
                 if msg is None:
                     break
+                upload_seq=0
+                if isinstance(msg,tuple):
+                    upload_seq,msg=msg
                 if self.config.http_request_min_upload_ms>0:
                     delay=(self.config.http_request_min_upload_ms/1000.0)-(time.time()-self.last_upload_time)
                     if delay>0:
@@ -703,17 +719,23 @@ class HTTPRequestClientTransport:
                         break
                     batch.extend(next_msg)
                 try:
-                    status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"max":str(self.config.http_request_max_download_bytes)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                    if not upload_seq:
+                        self.upload_seq=(self.upload_seq+1)%0xFFFFFFFF
+                        upload_seq=self.upload_seq
+                    status,headers,data=await self.request("POST","upload",body=bytes(batch),extra_headers={"max":str(self.config.http_request_max_download_bytes),"upload":str(upload_seq)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_UPLOAD:str(upload_seq)},timeout_seconds=self.stall_timeout())
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
+                    self.upload_backlog.insert(0,(upload_seq,bytes(batch)))
                     self.log_error_throttled(f"HTTP request upload disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
                     continue
                 if status==404:
+                    self.upload_backlog.insert(0,(upload_seq,bytes(batch)))
                     await self.fail_transport(ConnectionError("HTTP request session not found"))
                     break
                 self.last_upload_time=time.time()
                 self.last_activity_time=self.last_upload_time
-                if status not in (200,204) and not data:
+                if status not in (200,204):
+                    self.upload_backlog.insert(0,(upload_seq,bytes(batch)))
                     self.log_error_throttled(f"HTTP request upload failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
                     continue
@@ -746,7 +768,7 @@ class HTTPRequestClientTransport:
             while not self.stop_event.is_set():
                 try:
                     wait_ms=self.config.ping_interval*1000 if self.is_idle() else self.config.http_request_min_download_ms
-                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(wait_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(wait_ms)},timeout_seconds=max(30,self.config.ping_timeout*2))
+                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(wait_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(wait_ms)},timeout_seconds=self.stall_timeout())
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
                     self.log_error_throttled(f"HTTP request poll disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
@@ -754,7 +776,7 @@ class HTTPRequestClientTransport:
                 if status==404:
                     await self.fail_transport(ConnectionError("HTTP request session not found"))
                     break
-                if status not in (200,204) and not data:
+                if status not in (200,204):
                     self.log_error_throttled(f"HTTP request poll failed with HTTP {status}, retrying")
                     await asyncio.sleep(0.1)
                     continue
@@ -805,7 +827,7 @@ class HTTPRequestClientTransport:
                     if response.status!=200:
                         raise ConnectionError(f"SSE failed with HTTP {response.status}")
                     while not response.content.at_eof():
-                        raw_line=await response.content.readline()
+                        raw_line=await asyncio.wait_for(response.content.readline(),timeout=self.stall_timeout())
                         if not raw_line:
                             break
                         if self.stop_event.is_set():
@@ -828,7 +850,11 @@ class HTTPRequestClientTransport:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            await self.fail_transport(e)
+            if not self.stop_event.is_set():
+                self.log_error_throttled(f"HTTP request SSE disconnected, reconnecting: {self.format_error(e)}")
+                await asyncio.sleep(0.1)
+                if not self.stop_event.is_set():
+                    self.sse_task=asyncio.create_task(self.sse_loop())
     async def send(self,msg):
         await self.send_queue.put(msg)
     async def recv(self):
