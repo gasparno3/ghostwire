@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.13
 import asyncio
 import logging
+import resource
 import signal
 import sys
 import time
@@ -1212,6 +1213,12 @@ def main():
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
+    try:
+        soft,hard=resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft<hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE,(hard,hard))
+    except Exception:
+        pass
     setup_logging(config)
     server=GhostWireServer(config)
     loop=asyncio.new_event_loop()

@@ -744,7 +744,7 @@ class GhostWireClient:
                 self.reconnect_delay=self.config.initial_delay
                 return True
             elif self.config.protocol in ("http-request", "http-request-body", "http-request-sse"):
-                self.http_request_transport=HTTPRequestClientTransport(server_url,self.config.token,self.config,headers=extra_headers,proxy=self.pick_ws_proxy(server_url),ssl_context=self.make_ssl_context(server_url))
+                self.http_request_transport=HTTPRequestClientTransport(server_url,self.config.token,self.config,headers=extra_headers,proxy=self.pick_ws_proxy(server_url),ssl_context=self.make_ssl_context(server_url),sni=sni_host)
                 success=await self.http_request_transport.connect()
                 if not success:
                     return False

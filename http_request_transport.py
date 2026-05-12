@@ -448,7 +448,7 @@ async def start_http_request_server(server_instance):
     logger.info("HTTP request server stopped")
 
 class HTTPRequestClientTransport:
-    def __init__(self,server_url,token,config,headers=None,proxy=None,ssl_context=None):
+    def __init__(self,server_url,token,config,headers=None,proxy=None,ssl_context=None,sni=None):
         if getattr(config,"gas_script_id",""):
             server_url=f"https://script.google.com/macros/s/{config.gas_script_id}/exec"
         parsed=urlparse(server_url.replace("wss://","https://").replace("ws://","http://"))
@@ -461,6 +461,7 @@ class HTTPRequestClientTransport:
         self.headers=headers or {}
         self.proxy=proxy or None
         self.ssl_context=ssl_context
+        self.sni=sni
         self.session=None
         self.session_id=""
         self.key=None
@@ -548,6 +549,7 @@ class HTTPRequestClientTransport:
         current_body=body
         for _ in range(10):
             request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
+            sni_host=sni_host or self.sni
             if request_url!=current_url:
                 logger.debug(f"HTTP request rewrite: {current_url} -> {request_url} host={request_headers.get('Host','')} sni={sni_host or ''}")
             async with self.session.request(current_method,request_url,params=params,data=current_body,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=timeout_seconds),allow_redirects=False,server_hostname=sni_host) as response:
@@ -819,6 +821,7 @@ class HTTPRequestClientTransport:
             current_url=self.server_url
             for _ in range(10):
                 request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
+                sni_host=sni_host or self.sni
                 async with self.session.get(request_url,params=params,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=None),allow_redirects=False,server_hostname=sni_host) as response:
                     if response.status in (301,302,303,307,308) and getattr(self.config,"allow_redirects",True) and "Location" in response.headers:
                         current_url=urljoin(current_url,response.headers["Location"])
