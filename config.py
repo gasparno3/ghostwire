@@ -158,7 +158,13 @@ class ClientConfig:
         self.direct_mode=config["server"].get("direct_mode","to_server")
         self.port_mappings=parse_port_mappings(config.get("tunnels",{}).get("ports",[]))
         self.allow_insecure=config["server"].get("allow_insecure",False)
-        self.resolve_ip=config["server"].get("resolve_ip","")
+        _raw_resolve_ip=config["server"].get("resolve_ip","")
+        if isinstance(_raw_resolve_ip,list):
+            self.resolve_ips=[str(ip).strip() for ip in _raw_resolve_ip if str(ip).strip()]
+        else:
+            self.resolve_ips=[ip.strip() for ip in str(_raw_resolve_ip).split(",") if ip.strip()]
+        self.resolve_ip=self.resolve_ips[0] if self.resolve_ips else ""
+        self.resolve_ip_mode=config["server"].get("resolve_ip_mode","least_ping")
         self.sni=config["server"].get("sni","")
         self.host_header=config["server"].get("host_header","")
         self.domain_fronting_host=config["server"].get("domain_fronting_host","")

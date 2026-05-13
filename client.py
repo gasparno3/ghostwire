@@ -70,6 +70,8 @@ class GhostWireClient:
         self.desired_child_count=0
         self.last_http_request_reconnect_log=0
         self.data_rr_index=0
+        self._resolve_rr_index=0
+        self._active_resolve_ip=""
         self.conn_data_tx_seq={}
         self.conn_data_seq_enabled=set()
         self.conn_data_rx_expected={}
@@ -93,15 +95,55 @@ class GhostWireClient:
             return False
         return url.startswith("wss://") or url.startswith("https://")
     def apply_resolve_ip(self,url):
+        active_ip=self._active_resolve_ip or self.config.resolve_ip
         parsed=urlparse(url)
-        sni=self.config.sni or (parsed.hostname if self.config.resolve_ip else None)
-        host=self.config.host_header or (parsed.hostname if self.config.resolve_ip else None)
+        sni=self.config.sni or (parsed.hostname if active_ip else None)
+        host=self.config.host_header or (parsed.hostname if active_ip else None)
         headers={"Host":host} if host else {}
-        if not self.config.resolve_ip:
+        if not active_ip:
             return url,headers,sni
         port=f":{parsed.port}" if parsed.port else ""
-        modified=url.replace(f"{parsed.scheme}://{parsed.hostname}{port}",f"{parsed.scheme}://{self.config.resolve_ip}{port}",1)
+        modified=url.replace(f"{parsed.scheme}://{parsed.hostname}{port}",f"{parsed.scheme}://{active_ip}{port}",1)
         return modified,headers,sni
+    async def _pick_least_ping_ip(self,url):
+        parsed=urlparse(url)
+        port=parsed.port or (443 if parsed.scheme in ("https","wss") else 80)
+        best_ip=self.config.resolve_ips[0]
+        best_ms=float("inf")
+        for ip in self.config.resolve_ips:
+            try:
+                t=time.monotonic()
+                _,writer=await asyncio.wait_for(asyncio.open_connection(ip,port),timeout=3)
+                ms=(time.monotonic()-t)*1000
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                if ms<best_ms:
+                    best_ms=ms
+                    best_ip=ip
+            except Exception:
+                continue
+        if best_ms<float("inf"):
+            logger.info(f"resolve_ip least_ping: {best_ip} ({best_ms:.0f}ms)")
+        else:
+            logger.warning(f"resolve_ip least_ping: all IPs unreachable, using {best_ip}")
+        return best_ip
+    async def _select_resolve_ip(self,url):
+        ips=self.config.resolve_ips
+        if not ips:
+            self._active_resolve_ip=""
+            return
+        if len(ips)==1:
+            self._active_resolve_ip=ips[0]
+            return
+        if self.config.resolve_ip_mode=="round_robin":
+            self._active_resolve_ip=ips[self._resolve_rr_index%len(ips)]
+            self._resolve_rr_index+=1
+            logger.info(f"resolve_ip round_robin: {self._active_resolve_ip}")
+        else:
+            self._active_resolve_ip=await self._pick_least_ping_ip(url)
     def mode_accept_remote_connect(self):
         return self.config.mode=="reverse"
 
@@ -725,6 +767,7 @@ class GhostWireClient:
                     cf_sni=self.config.cloudflare_host
                     logger.info(f"Using CloudFlare IP: {best_ip}")
             self.connected_server_url=server_url
+            await self._select_resolve_ip(server_url)
             server_url,extra_headers,sni_host=self.apply_resolve_ip(server_url)
             if cf_sni and not sni_host:
                 sni_host=cf_sni
