@@ -72,6 +72,7 @@ class GhostWireClient:
         self.data_rr_index=0
         self._resolve_rr_index=0
         self._active_resolve_ip=""
+        self._resolve_ip_monitor_task=None
         self.conn_data_tx_seq={}
         self.conn_data_seq_enabled=set()
         self.conn_data_rx_expected={}
@@ -144,6 +145,20 @@ class GhostWireClient:
             logger.info(f"resolve_ip round_robin: {self._active_resolve_ip}")
         else:
             self._active_resolve_ip=await self._pick_least_ping_ip(url)
+    async def _resolve_ip_latency_loop(self,url):
+        try:
+            while self.running and not self.shutdown_event.is_set():
+                await asyncio.sleep(self.config.resolve_ip_latency_interval)
+                if not self.running or self.shutdown_event.is_set():
+                    break
+                new_ip=await self._pick_least_ping_ip(url)
+                if new_ip!=self._active_resolve_ip:
+                    logger.info(f"resolve_ip switching from {self._active_resolve_ip} to {new_ip}")
+                    self._active_resolve_ip=new_ip
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"resolve_ip latency monitor error: {e}")
     def mode_accept_remote_connect(self):
         return self.config.mode=="reverse"
 
@@ -1310,6 +1325,8 @@ class GhostWireClient:
                     ping_task=asyncio.create_task(self.ping_loop())
                     timeout_monitor=asyncio.create_task(self.ping_timeout_monitor())
                     seq_monitor=asyncio.create_task(self.sequence_timeout_monitor())
+                    if len(self.config.resolve_ips)>1 and self.config.resolve_ip_mode=="least_ping":
+                        self._resolve_ip_monitor_task=asyncio.create_task(self._resolve_ip_latency_loop(self.config.server_url))
                     self.channel_recv_tasks["main"]=receive_task
                     shutdown_task=asyncio.create_task(self.shutdown_event.wait())
                     wait_tasks={receive_task,shutdown_task}
@@ -1330,6 +1347,9 @@ class GhostWireClient:
                     ping_task.cancel()
                     timeout_monitor.cancel()
                     seq_monitor.cancel()
+                    if self._resolve_ip_monitor_task and not self._resolve_ip_monitor_task.done():
+                        self._resolve_ip_monitor_task.cancel()
+                    self._resolve_ip_monitor_task=None
                     if shutdown_task in done:
                         break
                 except Exception as e:

@@ -165,6 +165,7 @@ class ClientConfig:
             self.resolve_ips=[ip.strip() for ip in str(_raw_resolve_ip).split(",") if ip.strip()]
         self.resolve_ip=self.resolve_ips[0] if self.resolve_ips else ""
         self.resolve_ip_mode=config["server"].get("resolve_ip_mode","least_ping")
+        self.resolve_ip_latency_interval=config["server"].get("resolve_ip_latency_interval",60)
         self.sni=config["server"].get("sni","")
         self.host_header=config["server"].get("host_header","")
         self.domain_fronting_host=config["server"].get("domain_fronting_host","")
