@@ -106,26 +106,32 @@ class GhostWireClient:
         port=f":{parsed.port}" if parsed.port else ""
         modified=url.replace(f"{parsed.scheme}://{parsed.hostname}{port}",f"{parsed.scheme}://{active_ip}{port}",1)
         return modified,headers,sni
-    async def _pick_least_ping_ip(self,url):
+    async def _probe_ip_latency(self,url,ip):
         parsed=urlparse(url)
-        port=parsed.port or (443 if parsed.scheme in ("https","wss") else 80)
+        scheme="https" if parsed.scheme in ("https","wss") else "http"
+        port_str=f":{parsed.port}" if parsed.port else ""
+        probe_url=f"{scheme}://{ip}{port_str}{parsed.path or '/'}"
+        sni=self.config.sni or parsed.hostname
+        host=self.config.host_header or parsed.hostname
+        ssl_ctx=self.make_ssl_context(url)
+        proxy=self.pick_ws_proxy(url)
+        try:
+            connector=aiohttp.TCPConnector(limit=1)
+            async with aiohttp.ClientSession(connector=connector) as sess:
+                t=time.monotonic()
+                async with sess.get(probe_url,headers={"Host":host},ssl=ssl_ctx,server_hostname=sni if ssl_ctx else None,proxy=proxy,timeout=aiohttp.ClientTimeout(total=3),allow_redirects=False) as resp:
+                    await resp.read()
+                return (time.monotonic()-t)*1000
+        except Exception:
+            return float("inf")
+    async def _pick_least_ping_ip(self,url):
+        results=await asyncio.gather(*[self._probe_ip_latency(url,ip) for ip in self.config.resolve_ips])
         best_ip=self.config.resolve_ips[0]
         best_ms=float("inf")
-        for ip in self.config.resolve_ips:
-            try:
-                t=time.monotonic()
-                _,writer=await asyncio.wait_for(asyncio.open_connection(ip,port),timeout=3)
-                ms=(time.monotonic()-t)*1000
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-                if ms<best_ms:
-                    best_ms=ms
-                    best_ip=ip
-            except Exception:
-                continue
+        for ip,ms in zip(self.config.resolve_ips,results):
+            if ms<best_ms:
+                best_ms=ms
+                best_ip=ip
         if best_ms<float("inf"):
             logger.info(f"resolve_ip least_ping: {best_ip} ({best_ms:.0f}ms)")
         else:

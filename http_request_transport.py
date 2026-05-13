@@ -579,7 +579,7 @@ class HTTPRequestClientTransport:
     async def connect(self):
         try:
             connector=TCPConnector(limit=max(8,self.config.http_request_poll_connections+4),limit_per_host=max(8,self.config.http_request_poll_connections+4),ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
-            self.session=ClientSession(connector=connector,timeout=ClientTimeout(total=None))
+            self.session=ClientSession(connector=connector,timeout=ClientTimeout(total=None),read_bufsize=max(self.config.http_request_max_download_bytes*2,1048576))
             status,headers,body=await self.request("POST","open",timeout_seconds=30)
             meta={}
             if self.body_mode:
