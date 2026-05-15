@@ -346,6 +346,8 @@ class HTTPRequestServerHandler:
             await self.close_session(session.session_id)
             return web.Response(status=500)
     async def handle_poll(self,request):
+        if self.sse_mode:
+            return web.Response(status=204)
         session=self.get_session(request)
         if not session or session.closed:
             return web.Response(status=404)
@@ -616,7 +618,6 @@ class HTTPRequestClientTransport:
             self.upload_task=asyncio.create_task(self.upload_loop())
             if self.sse_mode:
                 self.sse_task=asyncio.create_task(self.sse_loop())
-                self.start_polling()
             elif getattr(self.config,"mode","reverse")!="direct":
                 self.start_polling()
             logger.info("HTTP request transport connected and authenticated")
