@@ -5,7 +5,7 @@ import logging
 import os
 import ssl
 import time
-from aiohttp import ClientError,ClientSession,ClientTimeout,TCPConnector,web
+from aiohttp import ClientError,ClientPayloadError,ClientSession,ClientTimeout,ServerDisconnectedError,TCPConnector,web
 from urllib.parse import parse_qsl,urljoin,urlparse,urlunparse
 from protocol import *
 from auth import validate_token
@@ -66,6 +66,7 @@ class HTTPRequestServerSession:
         self.outbound_seq=0
         self.outbound_pending={}
         self.upload_seen=set()
+        self.sse_generation=0
         self.key=None
         self.closed=False
         self.close_code=None
@@ -378,10 +379,12 @@ class HTTPRequestServerHandler:
         session=self.get_session(request)
         if not session or session.closed:
             return web.Response(status=404)
+        session.sse_generation+=1
+        my_generation=session.sse_generation
         response=web.StreamResponse(status=200,headers={"Content-Type":"text/event-stream","Cache-Control":"no-cache","Connection":"keep-alive"})
         await response.prepare(request)
         try:
-            while not session.closed and not self.shutdown_event.is_set():
+            while not session.closed and not self.shutdown_event.is_set() and session.sse_generation==my_generation:
                 session.touch()
                 batch_seq,response_body=await session.collect_outbound(self.server.config.http_request_max_download_bytes,self.server.config.http_request_min_download_ms)
                 if response_body:
@@ -808,56 +811,60 @@ class HTTPRequestClientTransport:
         except Exception as e:
             await self.fail_transport(e)
     async def sse_loop(self):
-        try:
-            params=list(self.base_params)
-            params.append(("action","sse"))
-            if self.session_id:
-                params.append(("sid",self.session_id))
-            headers=dict(self.headers)
-            user_agent=getattr(self.config,"user_agent","")
-            if user_agent:
-                headers.setdefault("User-Agent",user_agent)
-            headers[HDR_SESSION]=self.session_id
-            current_url=self.server_url
-            for _ in range(10):
-                request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
-                sni_host=sni_host or self.sni
-                async with self.session.get(request_url,params=params,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=None),allow_redirects=False,server_hostname=sni_host) as response:
-                    if response.status in (301,302,303,307,308) and getattr(self.config,"allow_redirects",True) and "Location" in response.headers:
-                        current_url=urljoin(current_url,response.headers["Location"])
-                        params=[]
-                        continue
-                    if response.status!=200:
-                        raise ConnectionError(f"SSE failed with HTTP {response.status}")
-                    while not response.content.at_eof():
-                        raw_line=await asyncio.wait_for(response.content.readline(),timeout=self.stall_timeout())
-                        if not raw_line:
-                            break
-                        if self.stop_event.is_set():
-                            return
-                        line=raw_line.strip()
-                        if not line or line.startswith(b":"):
+        while not self.stop_event.is_set():
+            try:
+                params=list(self.base_params)
+                params.append(("action","sse"))
+                if self.session_id:
+                    params.append(("sid",self.session_id))
+                headers=dict(self.headers)
+                user_agent=getattr(self.config,"user_agent","")
+                if user_agent:
+                    headers.setdefault("User-Agent",user_agent)
+                headers[HDR_SESSION]=self.session_id
+                current_url=self.server_url
+                for _ in range(10):
+                    request_url,request_headers,sni_host=self.apply_domain_fronting(current_url,headers)
+                    sni_host=sni_host or self.sni
+                    async with self.session.get(request_url,params=params,headers=request_headers,proxy=self.proxy,ssl=self.ssl_context,timeout=ClientTimeout(total=None),allow_redirects=False,server_hostname=sni_host) as response:
+                        if response.status in (301,302,303,307,308) and getattr(self.config,"allow_redirects",True) and "Location" in response.headers:
+                            current_url=urljoin(current_url,response.headers["Location"])
+                            params=[]
                             continue
-                        if not line.startswith(b"data:"):
-                            continue
-                        payload=base64.b64decode(line[5:].strip())
-                        seq_raw,_,data=payload.partition(b":")
-                        batch_seq=int(seq_raw or b"0")
-                        if not self.mark_batch_received(batch_seq):
-                            continue
-                        await self.request("POST","ack",extra_headers={HDR_ACK:str(batch_seq)},timeout_seconds=10)
-                        await self.recv_queue.put(data)
-                        self.last_activity_time=time.time()
-                    raise ConnectionError("SSE stream closed")
-            raise ConnectionError("SSE too many redirects")
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            if not self.stop_event.is_set():
+                        if response.status!=200:
+                            raise ConnectionError(f"SSE failed with HTTP {response.status}")
+                        while not response.content.at_eof():
+                            raw_line=await asyncio.wait_for(response.content.readline(),timeout=self.stall_timeout())
+                            if not raw_line:
+                                break
+                            if self.stop_event.is_set():
+                                return
+                            line=raw_line.strip()
+                            if not line or line.startswith(b":"):
+                                continue
+                            if not line.startswith(b"data:"):
+                                continue
+                            payload=base64.b64decode(line[5:].strip())
+                            seq_raw,_,data=payload.partition(b":")
+                            batch_seq=int(seq_raw or b"0")
+                            if not self.mark_batch_received(batch_seq):
+                                continue
+                            await self.request("POST","ack",extra_headers={HDR_ACK:str(batch_seq)},timeout_seconds=10)
+                            await self.recv_queue.put(data)
+                            self.last_activity_time=time.time()
+                        raise ConnectionError("SSE stream closed")
+                raise ConnectionError("SSE too many redirects")
+            except asyncio.CancelledError:
+                return
+            except (ClientPayloadError,ServerDisconnectedError) as e:
+                if self.stop_event.is_set():
+                    return
+                self.log_error_throttled(f"HTTP request SSE disconnected, reconnecting: {self.format_error(e)}")
+            except Exception as e:
+                if self.stop_event.is_set():
+                    return
                 self.log_error_throttled(f"HTTP request SSE disconnected, reconnecting: {self.format_error(e)}")
                 await asyncio.sleep(0.1)
-                if not self.stop_event.is_set():
-                    self.sse_task=asyncio.create_task(self.sse_loop())
     async def send(self,msg):
         await self.send_queue.put(msg)
     async def recv(self):
