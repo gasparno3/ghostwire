@@ -70,8 +70,14 @@ class GhostWireServer:
         self.ws_send_batch_bytes=config.ws_send_batch_bytes
         self.ws_write_limit=4194304
         self.ws_max_queue=2048
-        logger.info("Generating RSA key pair for secure authentication...")
-        self.private_key,self.public_key=generate_rsa_keypair()
+        if config.pinned_private_key:
+            logger.info(f"Loading pinned RSA private key from {config.pinned_private_key}...")
+            with open(config.pinned_private_key,"rb") as f:
+                self.private_key=serialization.load_pem_private_key(f.read(),password=None)
+            self.public_key=self.private_key.public_key()
+        else:
+            logger.info("Generating RSA key pair for secure authentication...")
+            self.private_key,self.public_key=generate_rsa_keypair()
         self.updater=Updater("server",check_interval=config.update_check_interval,check_on_startup=config.update_check_on_startup,http_proxy=config.update_http_proxy,https_proxy=config.update_https_proxy,service_name=config.service_name)
 
     def mode_is_server_listen(self):

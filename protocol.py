@@ -40,6 +40,9 @@ def serialize_public_key(public_key):
 def deserialize_public_key(public_key_bytes):
     return serialization.load_der_public_key(public_key_bytes)
 
+def fingerprint_public_key(public_key):
+    return hashlib.sha256(serialize_public_key(public_key)).hexdigest()
+
 def rsa_encrypt(public_key,plaintext):
     return public_key.encrypt(plaintext,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
 

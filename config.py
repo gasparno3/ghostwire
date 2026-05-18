@@ -109,6 +109,7 @@ class ServerConfig:
         self.ssl_cert=config["server"].get("ssl_cert","")
         self.ssl_key=config["server"].get("ssl_key","")
         self.service_name=config["server"].get("service_name","ghostwire-server")
+        self.pinned_private_key=config["server"].get("pinned_private_key","")
 
 class ClientConfig:
     def __init__(self,config_path):
@@ -175,3 +176,4 @@ class ClientConfig:
         self.http_request_body_method=config["server"].get("http_request_body_method","GET").upper()
         self.gas_script_id=config["server"].get("gas_script_id","")
         self.service_name=config["server"].get("service_name","ghostwire-client")
+        self.pinned_server_public_key=config["server"].get("pinned_server_public_key","")

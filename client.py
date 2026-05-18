@@ -865,6 +865,11 @@ class GhostWireClient:
                 if msg_type!=MSG_PUBKEY:
                     raise ValueError("Expected public key from server")
                 server_public_key,auth_salt=unpack_pubkey_payload(pubkey_bytes)
+                if self.config.pinned_server_public_key:
+                    with open(self.config.pinned_server_public_key,"rb") as _f:
+                        _pinned=serialization.load_pem_public_key(_f.read())
+                    if fingerprint_public_key(server_public_key)!=fingerprint_public_key(_pinned):
+                        raise ValueError("Server public key fingerprint mismatch — possible MITM")
                 client_private_key,client_public_key=generate_rsa_keypair()
                 auth_msg=pack_auth_message(self.config.token,server_public_key,role="main",auth_salt=auth_salt)
                 await self.main_websocket.send(auth_msg)
@@ -898,6 +903,11 @@ class GhostWireClient:
                 if msg_type!=MSG_PUBKEY:
                     raise ValueError("Expected public key from server")
                 server_public_key,auth_salt=unpack_pubkey_payload(pubkey_bytes)
+                if self.config.pinned_server_public_key:
+                    with open(self.config.pinned_server_public_key,"rb") as _f:
+                        _pinned=serialization.load_pem_public_key(_f.read())
+                    if fingerprint_public_key(server_public_key)!=fingerprint_public_key(_pinned):
+                        raise ValueError("Server public key fingerprint mismatch — possible MITM")
                 client_private_key,client_public_key=generate_rsa_keypair()
                 auth_msg=pack_auth_message(self.config.token,server_public_key,role="main",auth_salt=auth_salt)
                 await self.main_websocket.send(auth_msg)
@@ -964,6 +974,11 @@ class GhostWireClient:
             if msg_type!=MSG_PUBKEY:
                 raise ValueError("Expected public key from server")
             server_public_key,auth_salt=unpack_pubkey_payload(pubkey_bytes)
+            if self.config.pinned_server_public_key:
+                with open(self.config.pinned_server_public_key,"rb") as _f:
+                    _pinned=serialization.load_pem_public_key(_f.read())
+                if fingerprint_public_key(server_public_key)!=fingerprint_public_key(_pinned):
+                    raise ValueError("Server public key fingerprint mismatch — possible MITM")
             auth_msg=pack_auth_message(self.config.token,server_public_key,role="child",child_id=child_id,auth_salt=auth_salt)
             await ws.send(auth_msg)
             send_queue=asyncio.Queue(maxsize=512)
