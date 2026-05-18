@@ -170,6 +170,7 @@ auto_update=true
 update_check_interval=300
 update_check_on_startup=true
 service_name="ghostwire-server"  # systemd service name for auto-restart after update
+pinned_private_key=""          # optional: path to PEM private key file; if set, server uses this key instead of generating an ephemeral one
 
 [auth]
 token="V1StGXR8_Z5jdHi6B-my"
@@ -255,6 +256,7 @@ domain_fronting_target=""  # connect hostname/IP, e.g. www.google.com or a confi
 domain_fronting_sni=""     # TLS SNI used for domain fronting target
 gas_script_id=""           # Apps Script deployment ID; builds https://script.google.com/macros/s/{id}/exec
 service_name="ghostwire-client"  # systemd service name for auto-restart after update
+pinned_server_public_key=""    # optional: path to PEM public key file; if set, client verifies server identity (MITM protection)
 ws_send_batch_bytes=65536  # Max bytes per WebSocket frame (default: 65536)
 http_request_min_upload_ms=50      # Minimum delay between upload requests
 http_request_min_download_ms=100   # Minimum delay between poll requests

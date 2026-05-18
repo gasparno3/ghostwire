@@ -50,6 +50,33 @@ The AES-256-GCM authenticated encryption provides both confidentiality and integ
 - Tokens are never transmitted in plaintext — always PBKDF2-derived and RSA-encrypted
 - Token comparison uses `secrets.compare_digest` to prevent timing attacks
 
+## Server Key Pinning (MITM Protection)
+
+By default, the server generates a fresh RSA-2048 keypair on each startup. While PBKDF2 prevents token recovery, a MITM who can intercept the key exchange at the protocol layer could still transparently proxy the connection without either side knowing.
+
+Key pinning closes this gap:
+
+**Server** — set `pinned_private_key` to a PEM private key file path:
+```toml
+pinned_private_key="/etc/ghostwire/server_private.pem"
+```
+The server loads and uses this fixed key every startup. Its public key is then stable and shareable with clients.
+
+**Client** — set `pinned_server_public_key` to a PEM public key file path:
+```toml
+pinned_server_public_key="/etc/ghostwire/server_public.pem"
+```
+After receiving the server's public key during handshake, the client computes `SHA-256(DER(received_key))` and compares it against `SHA-256(DER(pinned_key))`. A mismatch aborts the connection with an error.
+
+**Generating a persistent keypair:**
+```bash
+openssl genrsa -out server_private.pem 2048
+openssl rsa -in server_private.pem -pubout -out server_public.pem
+```
+Copy `server_public.pem` to each client that should pin this server.
+
+If neither option is set, behavior is unchanged from previous versions — the server generates ephemeral keys and the client skips fingerprint verification.
+
 ## Summary
 
 | Layer | Mechanism |
@@ -60,3 +87,4 @@ The AES-256-GCM authenticated encryption provides both confidentiality and integ
 | Transport (WebSocket) | TLS via `wss://` |
 | Transport (HTTP/2 / gRPC) | TLS via `https://` |
 | Transport (HTTP per-request) | TLS via `https://`; auth and key exchange on dedicated HTTP requests before data flows |
+| Server identity | Optional RSA public key pinning via SHA-256 fingerprint comparison |

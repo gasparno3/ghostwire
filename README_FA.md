@@ -173,6 +173,7 @@ http_request_body_method="GET"     # حالت GET query یا POST body برای 
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
+pinned_private_key=""          # اختیاری: مسیر فایل PEM کلید خصوصی؛ اگر تنظیم شود، سرور از این کلید ثابت به جای کلید موقت استفاده می‌کند
 
 [auth]
 token="V1StGXR8_Z5jdHi6B-my"
@@ -232,6 +233,7 @@ gas_script_id=""           # Deployment ID در Apps Script؛ آدرس /macros/s
 auto_update=true
 update_check_interval=300
 update_check_on_startup=true
+pinned_server_public_key=""    # اختیاری: مسیر فایل PEM کلید عمومی سرور؛ اگر تنظیم شود، کلاینت هویت سرور را تایید می‌کند (محافظت در برابر MITM)
 
 [reconnect]
 initial_delay=1
