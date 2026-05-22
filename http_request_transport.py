@@ -392,10 +392,11 @@ class HTTPRequestServerHandler:
                 if response_body:
                     payload=base64.b64encode(f"{batch_seq}:".encode()+response_body)
                     await response.write(b"data: "+payload+b"\n\n")
+                    await response.drain()
                 else:
                     await response.write(b": keepalive\n\n")
-                await response.drain()
-                await asyncio.sleep(max(1,self.server.config.http_request_min_download_ms)/1000.0)
+                    await response.drain()
+                    await asyncio.sleep(max(1,self.server.config.http_request_min_download_ms)/1000.0)
         except (asyncio.CancelledError,ConnectionError):
             pass
         except Exception as e:
