@@ -388,11 +388,14 @@ class HTTPRequestServerHandler:
         try:
             while not session.closed and not self.shutdown_event.is_set() and session.sse_generation==my_generation:
                 session.touch()
+                is_retransmit=bool(session.outbound_pending)
                 batch_seq,response_body=await session.collect_outbound(self.server.config.http_request_max_download_bytes,self.server.config.http_request_min_download_ms)
                 if response_body:
                     payload=base64.b64encode(f"{batch_seq}:".encode()+response_body)
                     await response.write(b"data: "+payload+b"\n\n")
                     await response.drain()
+                    if is_retransmit:
+                        await asyncio.sleep(max(1,self.server.config.http_request_min_download_ms)/1000.0)
                 else:
                     await response.write(b": keepalive\n\n")
                     await response.drain()
