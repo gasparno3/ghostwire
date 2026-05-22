@@ -1040,7 +1040,7 @@ class GhostWireServer:
         connection=self.tunnel_manager.get_connection(conn_id)
         if not connection:
             buffer=self.preconnect_buffers.setdefault(conn_id,[])
-            if len(buffer)<16:
+            if len(buffer)<64:
                 buffer.append(payload)
             return
         if connection:

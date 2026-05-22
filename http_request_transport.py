@@ -861,6 +861,7 @@ class HTTPRequestClientTransport:
                 if self.stop_event.is_set():
                     return
                 self.log_error_throttled(f"HTTP request SSE disconnected, reconnecting: {self.format_error(e)}")
+                await asyncio.sleep(0.1)
             except Exception as e:
                 if self.stop_event.is_set():
                     return
