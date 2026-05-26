@@ -505,6 +505,8 @@ class HTTPRequestClientTransport:
         return getattr(self.config,"mode","reverse")=="direct" and time.time()-self.last_activity_time>=max(1,self.config.ping_interval)
     def stall_timeout(self):
         return max(5,min(30,self.config.ping_timeout/2))
+    def sse_stall_timeout(self):
+        return max(15,min(90,self.config.ping_interval*3))
     def apply_domain_fronting(self,url,headers):
         host=getattr(self.config,"domain_fronting_host","")
         target=getattr(self.config,"domain_fronting_target","")
@@ -585,6 +587,11 @@ class HTTPRequestClientTransport:
                 self.received_batches.clear()
                 self.received_batches.add(batch_seq)
         return True
+    async def _send_ack(self,batch_seq):
+        try:
+            await self.request("POST","ack",extra_headers={HDR_ACK:str(batch_seq)},timeout_seconds=10)
+        except Exception:
+            pass
     async def connect(self):
         try:
             connector=TCPConnector(limit=max(8,self.config.http_request_poll_connections+4),limit_per_host=max(8,self.config.http_request_poll_connections+4),ssl=self.ssl_context if isinstance(self.ssl_context,ssl.SSLContext) else None)
@@ -778,7 +785,7 @@ class HTTPRequestClientTransport:
             while not self.stop_event.is_set():
                 try:
                     wait_ms=self.config.ping_interval*1000 if self.is_idle() else self.config.http_request_min_download_ms
-                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(wait_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(wait_ms)},timeout_seconds=self.stall_timeout())
+                    status,headers,data=await self.request("GET","poll",extra_headers={"max":str(self.config.http_request_max_download_bytes),"wait":str(wait_ms)} if self.body_mode else {HDR_MAX:str(self.config.http_request_max_download_bytes),HDR_WAIT:str(wait_ms)},timeout_seconds=self.stall_timeout()+wait_ms/1000.0)
                 except (ClientError,ConnectionError,asyncio.TimeoutError) as e:
                     self.log_error_throttled(f"HTTP request poll disconnected, retrying: {self.format_error(e)}")
                     await asyncio.sleep(0.1)
@@ -816,7 +823,9 @@ class HTTPRequestClientTransport:
         except Exception as e:
             await self.fail_transport(e)
     async def sse_loop(self):
+        reconnect_delay=0.1
         while not self.stop_event.is_set():
+            got_data=False
             try:
                 params=list(self.base_params)
                 params.append(("action","sse"))
@@ -839,7 +848,7 @@ class HTTPRequestClientTransport:
                         if response.status!=200:
                             raise ConnectionError(f"SSE failed with HTTP {response.status}")
                         while not response.content.at_eof():
-                            raw_line=await asyncio.wait_for(response.content.readline(),timeout=self.stall_timeout())
+                            raw_line=await asyncio.wait_for(response.content.readline(),timeout=self.sse_stall_timeout())
                             if not raw_line:
                                 break
                             if self.stop_event.is_set():
@@ -852,11 +861,13 @@ class HTTPRequestClientTransport:
                             payload=base64.b64decode(line[5:].strip())
                             seq_raw,_,data=payload.partition(b":")
                             batch_seq=int(seq_raw or b"0")
-                            if not self.mark_batch_received(batch_seq):
+                            is_new=self.mark_batch_received(batch_seq)
+                            asyncio.create_task(self._send_ack(batch_seq))
+                            if not is_new:
                                 continue
-                            await self.request("POST","ack",extra_headers={HDR_ACK:str(batch_seq)},timeout_seconds=10)
                             await self.recv_queue.put(data)
                             self.last_activity_time=time.time()
+                            got_data=True
                         raise ConnectionError("SSE stream closed")
                 raise ConnectionError("SSE too many redirects")
             except asyncio.CancelledError:
@@ -865,12 +876,14 @@ class HTTPRequestClientTransport:
                 if self.stop_event.is_set():
                     return
                 self.log_error_throttled(f"HTTP request SSE disconnected, reconnecting: {self.format_error(e)}")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay=0.1 if got_data else min(5.0,reconnect_delay*2)
             except Exception as e:
                 if self.stop_event.is_set():
                     return
                 self.log_error_throttled(f"HTTP request SSE disconnected, reconnecting: {self.format_error(e)}")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay=0.1 if got_data else min(5.0,reconnect_delay*2)
     async def send(self,msg):
         await self.send_queue.put(msg)
     async def recv(self):
