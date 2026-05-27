@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.13
 import asyncio
 import logging
+import resource
 import signal
 import sys
 import time
@@ -58,7 +59,7 @@ class GhostWireClient:
         self.conn_write_queues={}
         self.conn_write_tasks={}
         self.connect_tasks=set()
-        self.connect_semaphore=asyncio.Semaphore(1024)
+        self.connect_semaphore=asyncio.Semaphore(4096)
         self.preconnect_buffers={}
         self.connected_server_url=""
         self.child_channels={}
@@ -79,6 +80,7 @@ class GhostWireClient:
         self.conn_data_rx_pending={}
         self.conn_data_rx_wait_start={}
         self.conn_data_close_seq={}
+        self.conn_data_inflight={}
         self.seq_timeout=30
         self.io_chunk_size=262144
         self.writer_batch_bytes=262144
@@ -238,7 +240,9 @@ class GhostWireClient:
         self.conn_data_seq_enabled.clear()
         self.conn_data_rx_expected.clear()
         self.conn_data_rx_pending.clear()
+        self.conn_data_rx_wait_start.clear()
         self.conn_data_close_seq.clear()
+        self.conn_data_inflight.clear()
 
     def spawn_connect_task(self,conn_id,remote_ip,remote_port):
         task=asyncio.create_task(self.handle_connect(conn_id,remote_ip,remote_port))
@@ -462,6 +466,7 @@ class GhostWireClient:
         self.conn_data_rx_pending.pop(conn_id,None)
         self.conn_data_rx_wait_start.pop(conn_id,None)
         self.conn_data_close_seq.pop(conn_id,None)
+        self.conn_data_inflight.pop(conn_id,None)
 
     def get_available_child_ids(self):
         return [child_id for child_id,channel in self.child_channels.items() if channel.get("ws") and getattr(channel.get("ws"),"close_code",None) is None]
@@ -519,6 +524,11 @@ class GhostWireClient:
                 if conn_id not in self.conn_data_rx_wait_start:
                     self.conn_data_rx_wait_start[conn_id]=time.time()
             self.conn_data_rx_expected[conn_id]=expected
+            if self.config.ws_pool_stripe and expected%ACK_INTERVAL==0 and self.main_control_queue:
+                try:
+                    self.main_control_queue.put_nowait(await pack_seq_ack(conn_id,expected-1,self.key))
+                except asyncio.QueueFull:
+                    pass
             await self.maybe_finalize_close_seq(conn_id)
             return
         pending=self.conn_data_rx_pending.setdefault(conn_id,{})
@@ -549,6 +559,38 @@ class GhostWireClient:
                     self.conn_data_rx_wait_start[conn_id]=time.time()
                 else:
                     self.conn_data_rx_wait_start.pop(conn_id,None)
+
+    async def handle_seq_ack(self,conn_id,ack_seq):
+        inflight=self.conn_data_inflight.get(conn_id)
+        if not inflight:
+            return
+        for seq in [s for s in list(inflight) if s<=ack_seq]:
+            del inflight[seq]
+        if not inflight:
+            self.conn_data_inflight.pop(conn_id,None)
+
+    async def retransmit_inflight_for_child(self,dead_child_id):
+        available=[cid for cid in self.get_available_child_ids() if cid!=dead_child_id]
+        if not available:
+            logger.warning(f"Child {dead_child_id} lost, no survivors to retransmit inflight")
+            return
+        rr=0
+        retx_count=0
+        for conn_id,inflight in list(self.conn_data_inflight.items()):
+            entries=sorted((seq,msg) for seq,(cid,msg) in inflight.items() if cid==dead_child_id)
+            for seq,msg in entries:
+                new_child=available[rr%len(available)]
+                rr+=1
+                inflight[seq]=(new_child,msg)
+                sq=self.child_channels.get(new_child,{}).get("send_queue")
+                if sq:
+                    try:
+                        sq.put_nowait(msg)
+                        retx_count+=1
+                    except asyncio.QueueFull:
+                        pass
+        if retx_count:
+            logger.info(f"Child {dead_child_id} lost, retransmitted {retx_count} inflight chunks to survivors")
 
     async def handle_remote_close(self,conn_id):
         self.conn_channel_map.pop(conn_id,None)
@@ -1035,7 +1077,12 @@ class GhostWireClient:
                 use_seq=conn_id in self.conn_data_seq_enabled or self.should_stripe_data()
                 if use_seq:
                     self.conn_data_seq_enabled.add(conn_id)
-                    message=await pack_data_seq(conn_id,self.next_data_seq(conn_id),data,self.key)
+                    seq=self.next_data_seq(conn_id)
+                    message=await pack_data_seq(conn_id,seq,data,self.key)
+                    if self.config.ws_pool_stripe:
+                        inflight=self.conn_data_inflight.setdefault(conn_id,{})
+                        if len(inflight)<128:
+                            inflight[seq]=(channel_id,message)
                 else:
                     message=await pack_data(conn_id,data,self.key)
                 try:
@@ -1118,6 +1165,8 @@ class GhostWireClient:
                     elif msg_type==MSG_PONG:
                         if channel_id=="main":
                             self.last_pong_time=time.time()
+                    elif msg_type==MSG_SEQ_ACK:
+                        await self.handle_seq_ack(conn_id,unpack_seq_ack(payload))
                     elif msg_type==MSG_CHILD_CFG and channel_id=="main":
                         child_count=unpack_child_cfg(payload)
                         await self.sync_child_workers(child_count)
@@ -1129,8 +1178,7 @@ class GhostWireClient:
             if channel_id!="main":
                 affected=[conn_id for conn_id,mapped_channel in self.conn_channel_map.items() if mapped_channel==channel_id]
                 if self.conn_data_seq_enabled:
-                    striped_count=len(self.conn_data_seq_enabled)
-                    logger.info(f"Child {channel_id} lost during striped mode, {striped_count} striped connections will timeout if sequences are missing")
+                    await self.retransmit_inflight_for_child(channel_id)
                     for conn_id in affected:
                         self.conn_channel_map.pop(conn_id,None)
                     await self.close_channel(channel_id)
@@ -1153,10 +1201,18 @@ class GhostWireClient:
         connection=self.tunnel_manager.get_connection(conn_id)
         if not connection:
             buffer=self.preconnect_buffers.setdefault(conn_id,[])
-            if len(buffer)<64:
+            if len(buffer)<256:
                 buffer.append(payload)
             else:
-                logger.warning(f"Preconnect buffer full for remote connection {conn_id}")
+                logger.warning(f"Preconnect buffer overflow for {conn_id}, closing")
+                self.preconnect_buffers.pop(conn_id,None)
+                self.clear_conn_data_state(conn_id)
+                self.conn_channel_map.pop(conn_id,None)
+                if self.main_control_queue:
+                    try:
+                        self.main_control_queue.put_nowait(await pack_error(conn_id,"preconnect buffer overflow",self.key))
+                    except asyncio.QueueFull:
+                        pass
             return
         if connection:
             _,writer=connection
@@ -1475,6 +1531,12 @@ def main():
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
+    try:
+        soft,hard=resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft<hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE,(hard,hard))
+    except Exception:
+        pass
     setup_logging(config)
     client=GhostWireClient(config)
     loop=asyncio.new_event_loop()

@@ -25,6 +25,8 @@ MSG_SESSION_KEY=0x0A
 MSG_DATA_SEQ=0x0B
 MSG_CLOSE_SEQ=0x0C
 MSG_CONNECT_UDP=0x0D
+MSG_SEQ_ACK=0x0E
+ACK_INTERVAL=16
 
 @lru_cache(maxsize=64)
 def get_aesgcm(key):
@@ -183,3 +185,9 @@ def pack_session_key(session_key,client_public_key):
 
 def unpack_session_key(payload,client_private_key):
     return rsa_decrypt(client_private_key,payload)
+
+async def pack_seq_ack(conn_id,ack_seq,key):
+    return await pack_message(MSG_SEQ_ACK,conn_id,struct.pack("!I",ack_seq),key)
+
+def unpack_seq_ack(payload):
+    return struct.unpack("!I",payload)[0]

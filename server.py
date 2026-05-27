@@ -62,6 +62,7 @@ class GhostWireServer:
         self.conn_data_rx_pending={}
         self.conn_data_rx_wait_start={}
         self.conn_data_close_seq={}
+        self.conn_data_inflight={}
         self.seq_timeout=30
         self.udp_sessions={}
         self.preconnect_buffers={}
@@ -282,6 +283,7 @@ class GhostWireServer:
         self.conn_data_rx_pending.pop(conn_id,None)
         self.conn_data_rx_wait_start.pop(conn_id,None)
         self.conn_data_close_seq.pop(conn_id,None)
+        self.conn_data_inflight.pop(conn_id,None)
 
     def should_stripe_data(self):
         return self.config.ws_pool_enabled and self.config.ws_pool_stripe and self.config.protocol in ("websocket","aiohttp-ws") and len(self.get_available_child_ids())>1
@@ -344,6 +346,11 @@ class GhostWireServer:
                 if conn_id not in self.conn_data_rx_wait_start:
                     self.conn_data_rx_wait_start[conn_id]=time.time()
             self.conn_data_rx_expected[conn_id]=expected
+            if self.config.ws_pool_stripe and expected%ACK_INTERVAL==0 and self.main_control_queue:
+                try:
+                    self.main_control_queue.put_nowait(await pack_seq_ack(conn_id,expected-1,self.key))
+                except asyncio.QueueFull:
+                    pass
             await self.maybe_finalize_close_seq(conn_id)
             return
         pending=self.conn_data_rx_pending.setdefault(conn_id,{})
@@ -396,11 +403,42 @@ class GhostWireServer:
         await asyncio.gather(*[_close_one(cid,ch) for cid,ch in list(self.child_channels.items())],return_exceptions=True)
         self.conn_channel_map.clear()
 
+    async def handle_seq_ack(self,conn_id,ack_seq):
+        inflight=self.conn_data_inflight.get(conn_id)
+        if not inflight:
+            return
+        for seq in [s for s in list(inflight) if s<=ack_seq]:
+            del inflight[seq]
+        if not inflight:
+            self.conn_data_inflight.pop(conn_id,None)
+
+    async def retransmit_inflight_for_child(self,dead_child_id):
+        available=[cid for cid,ch in self.child_channels.items() if cid!=dead_child_id and ch.get("ws") and getattr(ch.get("ws"),"close_code",None) is None]
+        if not available:
+            logger.warning(f"Child {dead_child_id} lost, no survivors to retransmit inflight")
+            return
+        rr=0
+        retx_count=0
+        for conn_id,inflight in list(self.conn_data_inflight.items()):
+            entries=sorted((seq,msg) for seq,(cid,msg) in inflight.items() if cid==dead_child_id)
+            for seq,msg in entries:
+                new_child=available[rr%len(available)]
+                rr+=1
+                inflight[seq]=(new_child,msg)
+                sq=self.child_channels.get(new_child,{}).get("send_queue")
+                if sq:
+                    try:
+                        sq.put_nowait(msg)
+                        retx_count+=1
+                    except asyncio.QueueFull:
+                        pass
+        if retx_count:
+            logger.info(f"Child {dead_child_id} lost, retransmitted {retx_count} inflight chunks to survivors")
+
     async def close_connections_for_child(self,child_id):
         affected=[conn_id for conn_id,mapped_child in self.conn_channel_map.items() if mapped_child==child_id]
         if self.conn_data_seq_enabled:
-            striped_count=len(self.conn_data_seq_enabled)
-            logger.info(f"Child {child_id} lost during striped mode, {striped_count} striped connections will timeout if sequences are missing")
+            await self.retransmit_inflight_for_child(child_id)
             for conn_id in affected:
                 self.conn_channel_map.pop(conn_id,None)
             return
@@ -443,6 +481,8 @@ class GhostWireServer:
         elif msg_type==MSG_INFO:
             self.client_version=payload.decode()
             logger.info(f"Client version: {self.client_version}")
+        elif msg_type==MSG_SEQ_ACK:
+            await self.handle_seq_ack(conn_id,unpack_seq_ack(payload))
     async def handle_client(self,websocket):
         client_id=f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
         logger.info(f"New connection from {client_id}")
@@ -552,7 +592,7 @@ class GhostWireServer:
                         del buffer[:consumed]
                     except ValueError:
                         break
-                    if msg_type in (MSG_DATA,MSG_DATA_SEQ,MSG_CLOSE,MSG_CLOSE_SEQ,MSG_ERROR,MSG_INFO):
+                    if msg_type in (MSG_DATA,MSG_DATA_SEQ,MSG_CLOSE,MSG_CLOSE_SEQ,MSG_ERROR,MSG_INFO,MSG_SEQ_ACK):
                         await self.route_message(msg_type,conn_id,payload)
                     elif msg_type==MSG_PING:
                         timestamp=struct.unpack("!Q",payload)[0]
@@ -998,7 +1038,12 @@ class GhostWireServer:
                 use_seq=conn_id in self.conn_data_seq_enabled or self.should_stripe_data()
                 if use_seq:
                     self.conn_data_seq_enabled.add(conn_id)
-                    message=await pack_data_seq(conn_id,self.next_data_seq(conn_id),data,self.key)
+                    seq=self.next_data_seq(conn_id)
+                    message=await pack_data_seq(conn_id,seq,data,self.key)
+                    if self.config.ws_pool_stripe:
+                        inflight=self.conn_data_inflight.setdefault(conn_id,{})
+                        if len(inflight)<128:
+                            inflight[seq]=(channel_id,message)
                 else:
                     message=await pack_data(conn_id,data,self.key)
                 try:
@@ -1040,8 +1085,18 @@ class GhostWireServer:
         connection=self.tunnel_manager.get_connection(conn_id)
         if not connection:
             buffer=self.preconnect_buffers.setdefault(conn_id,[])
-            if len(buffer)<64:
+            if len(buffer)<256:
                 buffer.append(payload)
+            else:
+                logger.warning(f"Preconnect buffer overflow for {conn_id}, closing")
+                self.preconnect_buffers.pop(conn_id,None)
+                self.clear_conn_data_state(conn_id)
+                self.conn_channel_map.pop(conn_id,None)
+                if self.main_control_queue:
+                    try:
+                        self.main_control_queue.put_nowait(await pack_error(conn_id,"preconnect buffer overflow",self.key))
+                    except asyncio.QueueFull:
+                        pass
             return
         if connection:
             _,writer=connection
