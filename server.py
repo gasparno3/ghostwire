@@ -46,6 +46,7 @@ class GhostWireServer:
         self.shutdown_event=asyncio.Event()
         self.auth_lock=asyncio.Lock()
         self.last_ping_time=0
+        self.last_rx_time=0
         self.ping_timeout=config.ping_timeout
         self.conn_write_queues={}
         self.conn_write_tasks={}
@@ -193,8 +194,23 @@ class GhostWireServer:
         finally:
             self.conn_write_queues.pop(conn_id,None)
             self.conn_write_tasks.pop(conn_id,None)
-            self.clear_conn_data_state(conn_id)
             self.tunnel_manager.remove_connection(conn_id)
+            if conn_id in self.conn_data_seq_enabled or conn_id in self.conn_data_tx_seq:
+                sq=self.get_send_queue_for_channel(self.conn_channel_map.get(conn_id,"main"))
+                if sq:
+                    try:
+                        sq.put_nowait(await pack_close_seq(conn_id,self.conn_data_tx_seq.get(conn_id,0),0,self.key))
+                    except (asyncio.QueueFull,Exception):
+                        pass
+            else:
+                sq=self.get_send_queue_for_channel(self.conn_channel_map.get(conn_id,"main"))
+                if sq:
+                    try:
+                        sq.put_nowait(await pack_close(conn_id,0,self.key))
+                    except (asyncio.QueueFull,Exception):
+                        pass
+            self.conn_channel_map.pop(conn_id,None)
+            self.clear_conn_data_state(conn_id)
 
     async def sender_task(self,websocket,send_queue,control_queue,stop_event):
         try:
@@ -583,6 +599,7 @@ class GhostWireServer:
                 if not self.listeners and self.mode_is_server_listen():
                     await self.start_listeners()
             async for message in websocket:
+                self.last_rx_time=time.time()
                 if role=="main":
                     self.last_ping_time=time.time()
                 buffer.extend(message)
@@ -679,7 +696,8 @@ class GhostWireServer:
         interval=max(2,self.ping_timeout//2)
         while self.running and not self.shutdown_event.is_set():
             await asyncio.sleep(interval)
-            if time.time()-self.last_ping_time>self.ping_timeout:
+            last_activity=max(self.last_ping_time,self.last_rx_time)
+            if time.time()-last_activity>self.ping_timeout:
                 logger.warning("Client ping timeout, closing connection")
                 if self.main_websocket:
                     await self.main_websocket.close()
@@ -802,6 +820,7 @@ class GhostWireServer:
                 logger.info(f"UDP child connected from {session.remote_address} id={child_id}")
             source_channel_id=child_id if role=="child" else "main"
             async for message in session:
+                self.last_rx_time=time.time()
                 if role=="main":
                     self.last_ping_time=time.time()
                 msg_type,conn_id,payload,_=await unpack_message(message,self.key)
@@ -864,7 +883,7 @@ class GhostWireServer:
             else:
                 reader,writer=await asyncio.wait_for(asyncio.open_connection(remote_ip,remote_port),timeout=10)
             self.tunnel_manager.add_connection(conn_id,(reader,writer))
-            queue=asyncio.Queue(maxsize=512)
+            queue=asyncio.Queue(maxsize=4096)
             self.conn_write_queues[conn_id]=queue
             self.conn_write_tasks[conn_id]=asyncio.create_task(self.conn_writer_loop(conn_id,writer,queue))
             for buffered in self.preconnect_buffers.pop(conn_id,[]):
