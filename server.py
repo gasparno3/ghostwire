@@ -194,23 +194,8 @@ class GhostWireServer:
         finally:
             self.conn_write_queues.pop(conn_id,None)
             self.conn_write_tasks.pop(conn_id,None)
+            self.conn_data_inflight.pop(conn_id,None)
             self.tunnel_manager.remove_connection(conn_id)
-            if conn_id in self.conn_data_seq_enabled or conn_id in self.conn_data_tx_seq:
-                sq=self.get_send_queue_for_channel(self.conn_channel_map.get(conn_id,"main"))
-                if sq:
-                    try:
-                        sq.put_nowait(await pack_close_seq(conn_id,self.conn_data_tx_seq.get(conn_id,0),0,self.key))
-                    except (asyncio.QueueFull,Exception):
-                        pass
-            else:
-                sq=self.get_send_queue_for_channel(self.conn_channel_map.get(conn_id,"main"))
-                if sq:
-                    try:
-                        sq.put_nowait(await pack_close(conn_id,0,self.key))
-                    except (asyncio.QueueFull,Exception):
-                        pass
-            self.conn_channel_map.pop(conn_id,None)
-            self.clear_conn_data_state(conn_id)
 
     async def sender_task(self,websocket,send_queue,control_queue,stop_event):
         try:
@@ -259,9 +244,11 @@ class GhostWireServer:
                         except asyncio.QueueEmpty:
                             break
                 if batch:
-                    await websocket.send(bytes(batch))
+                    await asyncio.wait_for(websocket.send(bytes(batch)),timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning("Sender task: websocket send timed out, closing")
         except Exception as e:
-            logger.debug(f"Sender task error: {e}")
+            logger.warning(f"Sender task error: {e}")
         finally:
             logger.debug("Sender task stopped")
 
@@ -510,7 +497,7 @@ class GhostWireServer:
         seq_monitor=None
         pool_monitor=None
         udp_cleanup=None
-        send_queue=asyncio.Queue(maxsize=512)
+        send_queue=asyncio.Queue(maxsize=4096)
         control_queue=asyncio.Queue(maxsize=256)
         stop_event=asyncio.Event()
         self.last_ping_time=time.time()
@@ -788,7 +775,7 @@ class GhostWireServer:
         seq_monitor=None
         pool_monitor=None
         udp_cleanup=None
-        send_queue=asyncio.Queue(maxsize=512)
+        send_queue=asyncio.Queue(maxsize=4096)
         control_queue=asyncio.Queue(maxsize=256)
         stop_event=asyncio.Event()
         if role=="main":

@@ -418,9 +418,11 @@ class GhostWireClient:
                         except asyncio.QueueEmpty:
                             break
                 if batch:
-                    await websocket.send(bytes(batch))
+                    await asyncio.wait_for(websocket.send(bytes(batch)),timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning("Sender task: websocket send timed out, closing")
         except Exception as e:
-            logger.debug(f"Sender task error: {e}")
+            logger.warning(f"Sender task error: {e}")
         finally:
             logger.debug("Sender task stopped")
 
@@ -1023,7 +1025,7 @@ class GhostWireClient:
                     raise ValueError("Server public key fingerprint mismatch — possible MITM")
             auth_msg=pack_auth_message(self.config.token,server_public_key,role="child",child_id=child_id,auth_salt=auth_salt)
             await ws.send(auth_msg)
-            send_queue=asyncio.Queue(maxsize=512)
+            send_queue=asyncio.Queue(maxsize=4096)
             control_queue=asyncio.Queue(maxsize=256)
             stop_event=asyncio.Event()
             self.child_channels[child_id]={"ws":ws,"send_queue":send_queue,"control_queue":control_queue,"slot_id":slot_id}
@@ -1368,7 +1370,7 @@ class GhostWireClient:
             update_task=asyncio.create_task(self.updater.update_loop(self.shutdown_event))
         while self.running and not self.shutdown_event.is_set():
             if await self.connect():
-                send_queue=asyncio.Queue(maxsize=512)
+                send_queue=asyncio.Queue(maxsize=4096)
                 control_queue=asyncio.Queue(maxsize=256)
                 stop_event=asyncio.Event()
                 self.send_queue=send_queue
