@@ -368,20 +368,8 @@ class GhostWireClient:
         finally:
             self.conn_write_queues.pop(conn_id,None)
             self.conn_write_tasks.pop(conn_id,None)
+            self.conn_data_inflight.pop(conn_id,None)
             self.tunnel_manager.remove_connection(conn_id)
-            channel_id=self.conn_channel_map.get(conn_id,"main")
-            channel=self.get_channel(channel_id)
-            sq=channel.get("send_queue") if channel else None
-            if sq:
-                try:
-                    if conn_id in self.conn_data_seq_enabled or conn_id in self.conn_data_tx_seq:
-                        sq.put_nowait(await pack_close_seq(conn_id,self.conn_data_tx_seq.get(conn_id,0),0,self.key))
-                    else:
-                        sq.put_nowait(await pack_close(conn_id,0,self.key))
-                except (asyncio.QueueFull,Exception):
-                    pass
-            self.conn_channel_map.pop(conn_id,None)
-            self.clear_conn_data_state(conn_id)
 
     async def sender_task(self,websocket,send_queue,control_queue,stop_event):
         try:
