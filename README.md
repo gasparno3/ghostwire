@@ -511,58 +511,76 @@ location /tunnel {
 
 **For WebSocket protocol:**
 ```nginx
-location /ws {
-    proxy_pass http://127.0.0.1:8443;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_read_timeout 86400;
-    proxy_send_timeout 86400;
-    proxy_buffering off;
-    proxy_request_buffering off;
-    tcp_nodelay on;
+server {
+    listen 443 ssl http2;
+    server_name tunnel.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location /ws {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        tcp_nodelay on;
+    }
 }
 ```
 
 **For HTTP/2 protocol:**
 ```nginx
-location /tunnel {
-    proxy_pass http://127.0.0.1:8443;
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_read_timeout 86400s;
+server {
+    listen 443 ssl http2;
+    server_name tunnel.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location /tunnel {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+    }
 }
 ```
 
 **For HTTP per-request and HTTP request SSE protocols:**
 ```nginx
-location /ws {
-    proxy_pass http://127.0.0.1:8443;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_read_timeout 86400;
-    proxy_send_timeout 86400;
-    proxy_buffering off;
-    proxy_request_buffering off;
+server {
+    listen 443 ssl http2;
+    server_name tunnel.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location /ws {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
 }
 ```
 
 **For gRPC protocol:**
-```nginx
-location /tunnel {
-    grpc_pass grpc://127.0.0.1:8443;
-    grpc_set_header Host $host;
-    grpc_set_header X-Real-IP $remote_addr;
-    grpc_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    grpc_read_timeout 86400s;
-    grpc_send_timeout 86400s;
-}
-```
-
-**For gRPC with CloudFlare:**
 ```nginx
 server {
     listen 443 ssl http2;
