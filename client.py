@@ -978,65 +978,69 @@ class GhostWireClient:
             return False
 
     async def find_best_cloudflare_ip(self):
-        best_ip=None
-        best_latency=float("inf")
-        for ip in self.config.cloudflare_ips:
+    best_ip=None
+    best_latency=float("inf")
+    for ip in self.config.cloudflare_ips:
+        session=aiohttp.ClientSession()
+        try:
+            test_url=self.config.server_url.replace(self.config.cloudflare_host,ip)
+            start=time.time()
             try:
-                test_url=self.config.server_url.replace(self.config.cloudflare_host,ip)
-                start=time.time()
-                session=aiohttp.ClientSession()
-                try:
-                    ws_raw=await asyncio.wait_for(session.ws_connect(test_url,max_msg_size=0,compress=False,heartbeat=None,proxy=self.pick_ws_proxy(test_url),ssl=self.make_ssl_context(test_url),headers={"Host":self.config.cloudflare_host},server_hostname=self.config.cloudflare_host),timeout=5)
-                except Exception:
-                    await session.close()
-                    raise
-                latency=time.time()-start
-                ws=AiohttpClientWebSocket(ws_raw,session)
-                await ws.close()
-                if latency<best_latency:
-                    best_latency=latency
-                    best_ip=ip
-            except:
+                ws_raw=await asyncio.wait_for(session.ws_connect(test_url,max_msg_size=0,compress=False,heartbeat=None,proxy=self.pick_ws_proxy(test_url),ssl=self.make_ssl_context(test_url),headers={"Host":self.config.cloudflare_host},server_hostname=self.config.cloudflare_host),timeout=5)
+            except Exception:
                 continue
-        return best_ip
+            latency=time.time()-start
+            ws=AiohttpClientWebSocket(ws_raw,session)
+            await ws.close()
+            if latency<best_latency:
+                best_latency=latency
+                best_ip=ip
+        except Exception:
+            continue
+        finally:
+            if not session.closed:
+                await session.close()
+    return best_ip
 
     async def connect_child_channel(self,server_url,slot_id):
-        child_id=generate(size=20)
+    child_id=generate(size=20)
+    session=aiohttp.ClientSession()
+    try:
+        server_url,extra_headers,sni_host=self.apply_resolve_ip(server_url)
         try:
-            server_url,extra_headers,sni_host=self.apply_resolve_ip(server_url)
-            session=aiohttp.ClientSession()
-            try:
-                ws_raw=await session.ws_connect(server_url,max_msg_size=0,compress=False,heartbeat=None,proxy=self.pick_ws_proxy(server_url),ssl=self.make_ssl_context(server_url),headers=extra_headers,server_hostname=sni_host)
-            except Exception:
-                await session.close()
-                raise
-            ws=AiohttpClientWebSocket(ws_raw,session)
-            pubkey_msg=await asyncio.wait_for(ws.recv(),timeout=10)
-            if len(pubkey_msg)<9:
-                raise ValueError("Invalid child public key message")
-            msg_type,_,pubkey_bytes,_=await unpack_message(pubkey_msg,None)
-            if msg_type!=MSG_PUBKEY:
-                raise ValueError("Expected public key from server")
-            server_public_key,auth_salt=unpack_pubkey_payload(pubkey_bytes)
-            if self.config.pinned_server_public_key:
-                with open(self.config.pinned_server_public_key,"rb") as _f:
-                    _pinned=serialization.load_pem_public_key(_f.read())
-                if fingerprint_public_key(server_public_key)!=fingerprint_public_key(_pinned):
-                    raise ValueError("Server public key fingerprint mismatch — possible MITM")
-            auth_msg=pack_auth_message(self.config.token,server_public_key,role="child",child_id=child_id,auth_salt=auth_salt)
-            await ws.send(auth_msg)
-            send_queue=asyncio.Queue(maxsize=4096)
-            control_queue=asyncio.Queue(maxsize=256)
-            stop_event=asyncio.Event()
-            self.child_channels[child_id]={"ws":ws,"send_queue":send_queue,"control_queue":control_queue,"slot_id":slot_id}
-            self.channel_stop_events[child_id]=stop_event
-            self.channel_sender_tasks[child_id]=asyncio.create_task(self.sender_task(ws,send_queue,control_queue,stop_event))
-            self.channel_recv_tasks[child_id]=asyncio.create_task(self.receive_messages(ws,child_id))
-            logger.info(f"Child channel established: slot={slot_id} id={child_id}")
-            return child_id
-        except Exception as e:
-            logger.warning(f"Child channel failed slot={slot_id} id={child_id}: {e}")
-            return None
+            ws_raw=await session.ws_connect(server_url,max_msg_size=0,compress=False,heartbeat=None,proxy=self.pick_ws_proxy(server_url),ssl=self.make_ssl_context(server_url),headers=extra_headers,server_hostname=sni_host)
+        except Exception:
+            await session.close()
+            raise
+        ws=AiohttpClientWebSocket(ws_raw,session)
+        pubkey_msg=await asyncio.wait_for(ws.recv(),timeout=10)
+        if len(pubkey_msg)<9:
+            raise ValueError("Invalid child public key message")
+        msg_type,_,pubkey_bytes,_=await unpack_message(pubkey_msg,None)
+        if msg_type!=MSG_PUBKEY:
+            raise ValueError("Expected public key from server")
+        server_public_key,auth_salt=unpack_pubkey_payload(pubkey_bytes)
+        if self.config.pinned_server_public_key:
+            with open(self.config.pinned_server_public_key,"rb") as _f:
+                _pinned=serialization.load_pem_public_key(_f.read())
+            if fingerprint_public_key(server_public_key)!=fingerprint_public_key(_pinned):
+                raise ValueError("Server public key fingerprint mismatch — possible MITM")
+        auth_msg=pack_auth_message(self.config.token,server_public_key,role="child",child_id=child_id,auth_salt=auth_salt)
+        await ws.send(auth_msg)
+        send_queue=asyncio.Queue(maxsize=4096)
+        control_queue=asyncio.Queue(maxsize=256)
+        stop_event=asyncio.Event()
+        self.child_channels[child_id]={"ws":ws,"send_queue":send_queue,"control_queue":control_queue,"slot_id":slot_id}
+        self.channel_stop_events[child_id]=stop_event
+        self.channel_sender_tasks[child_id]=asyncio.create_task(self.sender_task(ws,send_queue,control_queue,stop_event))
+        self.channel_recv_tasks[child_id]=asyncio.create_task(self.receive_messages(ws,child_id))
+        logger.info(f"Child channel established: slot={slot_id} id={child_id}")
+        return child_id
+    except Exception as e:
+        logger.warning(f"Child channel failed slot={slot_id} id={child_id}: {e}")
+        if not session.closed:
+            await session.close()
+        return None
 
     async def handle_connect(self,conn_id,remote_ip,remote_port):
         try:
